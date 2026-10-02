@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dasungctl"
+version = "0.1.0"
+description = "System-tray control and diagnostics for Dasung Paperlike e-ink monitors over CH340 serial"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+authors = [
+    { name = "sal7g86" },
+]
+keywords = ["dasung", "paperlike", "e-ink", "eink", "serial", "ch340", "tray"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: X11 Applications :: GTK",
+    "Intended Audience :: End Users/Desktop",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Desktop Environment",
+    "Topic :: System :: Hardware",
+]
+dependencies = [
+    "pyserial>=3.5",
+]
+
+[project.urls]
+Homepage = "https://github.com/sal7g86/eink-dasung-control"
+Source = "https://github.com/sal7g86/eink-dasung-control"
+Issues = "https://github.com/sal7g86/eink-dasung-control/issues"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+]
+# X11 window labels for the ghost estimate (EWMH through python-xlib).
+labels = [
+    "python-xlib>=0.31",
+]
+
+[project.scripts]
+dasungctl = "dasungctl.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+dasungctl = ["icons/*.png"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]
+pythonpath = [".", "src"]
