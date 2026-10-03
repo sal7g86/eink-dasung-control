@@ -3,8 +3,9 @@
 The tray talks to the monitor in-process through the project's client, so
 serial behaviour is the same everywhere. GTK 3 and Ayatana AppIndicator bindings
 live in the system Python, not in the project virtualenv: `dasungctl tray`
-re-executes itself with the system interpreter when needed, and
-``python3 -m dasungctl.tray`` also works directly.
+re-executes itself with the system interpreter when needed. The source runner
+``python3 src/_source_run.py`` starts the tray from a checkout, and
+``python3 -m dasungctl.tray`` does the same once the package is installed.
 
 Every successful change is stored as the last configuration (see
 ``dasungctl.state``) and applied again the next time the tray starts, so the
@@ -704,11 +705,11 @@ def _autostart_command() -> str:
     launcher = Path.home() / ".local" / "bin" / "dasungctl"
     if launcher.is_file() and os.access(launcher, os.X_OK):
         return f"{_exec_argument(str(launcher))} tray"
-    src = Path(__file__).resolve().parent.parent
+    runner = Path(__file__).resolve().parent / "_source_run.py"
     python = shutil.which("python3") or sys.executable
     return (
-        f"env PYTHONPATH={_exec_argument(str(src))} "
-        f"{_exec_argument(python)} -m dasungctl.tray"
+        f"{_exec_argument(python)} {_exec_argument(str(runner))} "
+        f"--module dasungctl.tray"
     )
 
 

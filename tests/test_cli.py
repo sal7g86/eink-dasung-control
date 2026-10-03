@@ -96,7 +96,7 @@ def test_tray_arguments_build_the_module_command_line():
         ["--device", "/dev/ttyUSB0", "--timeout", "2.5", "tray"]
     )
     assert cli._tray_arguments(args) == [
-        "-m",
+        "--module",
         "dasungctl.tray",
         "--device",
         "/dev/ttyUSB0",
@@ -108,7 +108,7 @@ def test_tray_arguments_build_the_module_command_line():
 def test_tray_arguments_work_without_the_subcommand():
     args = cli.build_parser().parse_args([])
 
-    assert cli._tray_arguments(args) == ["-m", "dasungctl.tray"]
+    assert cli._tray_arguments(args) == ["--module", "dasungctl.tray"]
 
 
 def test_tray_python_skips_the_venv_even_when_python3_points_to_it(

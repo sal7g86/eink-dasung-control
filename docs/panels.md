@@ -4,7 +4,7 @@
 has its own confirmed values: display-mode numbers, speed labels, frontlight
 presets and temperature mapping, the selector fields worth reading and their
 limits, and the EDID name used to find the monitor for the ghost capture.
-All of it lives in one `PanelProfile` (`src/dasungctl/panels.py`), so
+All of it lives in one `PanelProfile` (`src/panels.py`), so
 supporting another model means filling a profile — not touching the
 controller, the state, the UI or the capture code.
 
@@ -60,7 +60,7 @@ analysis behind the labels is in
    with `M` + `-`/`+`, and the accepted range of every field worth exposing.
    Record the exact frames and the calibration in
    [protocol.md](protocol.md), as the current model's section does.
-3. **Fill a `PanelProfile`** in `src/dasungctl/panels.py` and add it to
+3. **Fill a `PanelProfile`** in `src/panels.py` and add it to
    `PANELS`; select it with the `panel` key in `config.json`. Nothing else
    in the code needs changing.
 4. **Add tests** for the new tables, following `tests/test_panels.py`.

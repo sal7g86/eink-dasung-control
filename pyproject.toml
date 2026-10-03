@@ -49,8 +49,11 @@ labels = [
 [project.scripts]
 dasungctl = "dasungctl.cli:main"
 
-[tool.setuptools.packages.find]
-where = ["src"]
+[tool.setuptools]
+packages = ["dasungctl"]
+
+[tool.setuptools.package-dir]
+dasungctl = "src"
 
 [tool.setuptools.package-data]
 dasungctl = ["icons/*.png"]
@@ -58,4 +61,4 @@ dasungctl = ["icons/*.png"]
 [tool.pytest.ini_options]
 addopts = "-ra"
 testpaths = ["tests"]
-pythonpath = [".", "src"]
+pythonpath = ["."]

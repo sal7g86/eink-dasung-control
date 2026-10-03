@@ -92,7 +92,7 @@ sudo apt install python3-serial python3-gi gir1.2-gtk-3.0 \
   gir1.2-ayatanaappindicator3-0.1 python3-xlib
 git clone https://github.com/sal7g86/eink-dasung-control.git
 cd eink-dasung-control
-PYTHONPATH=src python3 -m dasungctl
+python3 src/_source_run.py
 ```
 
 `python3` must be the interpreter that owns the GTK bindings (on Mint and
@@ -129,7 +129,7 @@ writes the login entry. The menu and window controls are described in
 | [docs/ghost-estimate.md](docs/ghost-estimate.md) | the experimental ghost estimate and zone clearing |
 | [docs/protocol.md](docs/protocol.md) | confirmed serial protocol, captures, open questions |
 | [docs/research-findings.md](docs/research-findings.md) | distilled official-client static analysis |
-| [docs/development.md](docs/development.md) | tests, lint, tools, release |
+| [docs/development.md](docs/development.md) | tests, lint, release |
 | [docs/changelog.md](docs/changelog.md) | release history |
 
 ## Status
@@ -145,7 +145,7 @@ The tests use recorded frames and fakes and never open a serial device:
 
 ```console
 python -m pytest -q
-uvx ruff check src tests tools --select F,E9
+uvx ruff check src tests --select F,E9
 ```
 
 ## License

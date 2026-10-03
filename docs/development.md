@@ -2,20 +2,20 @@
 
 ## Repository layout
 
-- `src/dasungctl/` — the package: `cli.py` (entry point), `tray.py` (GTK
+- `src/` — the package: `cli.py` (entry point), `tray.py` (GTK
   tray, controller, startup) and `tray_windows.py` (Controls and Ghost
   windows), `client.py`/`protocol.py`/`transport.py` (serial),
   `panels.py` (per-model tables), `controls.py`/`state.py`/`config.py`
   (settings and persistence),
   `ghostwatch.py`/`screencap.py`/`windows.py`/`zoneclear.py` (ghost
   estimate), `doctor.py`/`locking.py`/`paths.py`/`logfile.py`.
+  `pyproject.toml` maps the `dasungctl` import name onto this directory;
+  `_source_run.py` runs the program from a checkout without installing it.
 - `tests/` — offline tests only: fakes, recorded frames, no serial device and
   no hardware. `tests/conftest.py` points every XDG directory at a temporary
   tree.
-- `tools/` — offline developer tools; they must never import
-  `dasungctl.transport` or touch serial/USB.
-- `docs/` — the project documentation; `docs/archive/` keeps the historical
-  lab notes; the repository root keeps only `README.md`.
+- `docs/` — the project documentation; the repository root keeps only
+  `README.md`.
 
 ## Environment and commands
 
@@ -26,17 +26,17 @@ uv pip install -e ".[dev]"
 
 python -m pytest -q                 # seconds, never touches hardware
 python -m pytest tests/test_tray.py -q
-uvx ruff check src tests tools --select F,E9
+uvx ruff check src tests --select F,E9
 ```
 
 There is no formatter or type checker configured; only ruff `F,E9` is
 expected to pass, so match the style of the surrounding code. The GTK
 bindings exist only in the system Python; `dasungctl` re-executes itself
 there when started from this environment. For a GUI smoke test without
-hardware, run
-`/usr/bin/python3` with `PYTHONPATH=src:tests`, build `TrayApp` (and the
-windows from `tray_windows`) against `tests.fakes.FakeTransport` and enter
-`Gtk.main()` only when needed for screenshots.
+hardware, run `/usr/bin/python3` with `PYTHONPATH=src:tests`, `import
+_source_run` (it maps the `dasungctl` name onto `src/`), then build `TrayApp`
+(and the windows from `tray_windows`) against `tests.fakes.FakeTransport` and
+enter `Gtk.main()` only when needed for screenshots.
 
 ## Protocol evidence
 
@@ -52,7 +52,7 @@ process can hold the monitor at a time (lock in `$XDG_STATE_HOME/dasungctl/`).
 
 Everything model-specific — mode numbers, speed labels, frontlight presets,
 temperature mapping, read fields and limits — lives in a `PanelProfile` in
-`src/dasungctl/panels.py`; the `panel` config key selects it and the code
+`src/panels.py`; the `panel` config key selects it and the code
 reads it through `get_panel()`. Adding a model is described in
 [docs/panels.md](panels.md); never copy calibrations between models, and
 keep tests in `tests/test_panels.py` in step with the tables.
@@ -80,7 +80,7 @@ longer match the interface, say so there too.
 
    ```console
    .venv/bin/python -m pytest -q
-   uvx ruff check src tests tools --select F,E9
+   uvx ruff check src tests --select F,E9
    ```
 
 4. Review the tree for files that must not be published (`git status`,

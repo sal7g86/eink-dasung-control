@@ -16,7 +16,7 @@ sudo apt install python3-serial python3-gi gir1.2-gtk-3.0 \
   gir1.2-ayatanaappindicator3-0.1 python3-xlib
 git clone https://github.com/sal7g86/eink-dasung-control.git
 cd eink-dasung-control
-PYTHONPATH=src python3 -m dasungctl
+python3 src/_source_run.py
 ```
 
 `python3` must be the interpreter that owns the GTK bindings (on Mint and
@@ -29,7 +29,7 @@ small launcher that points at the checkout:
 mkdir -p ~/.local/bin
 cat > ~/.local/bin/dasungctl <<'EOF'
 #!/bin/sh
-exec env PYTHONPATH="/path/to/eink-dasung-control/src" python3 -m dasungctl "$@"
+exec python3 "/path/to/eink-dasung-control/src/_source_run.py" "$@"
 EOF
 chmod +x ~/.local/bin/dasungctl
 ```

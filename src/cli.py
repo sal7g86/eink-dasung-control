@@ -151,9 +151,9 @@ def _render_doctor(checks: list[doctor_module.Check], as_json: bool, log=None) -
 
 
 def _tray_arguments(args: argparse.Namespace) -> list[str]:
-    """Rebuild the `-m dasungctl.tray` argv for the re-exec interpreter."""
+    """Rebuild the source-runner argv for the re-exec interpreter."""
 
-    argv = ["-m", "dasungctl.tray"]
+    argv = ["--module", "dasungctl.tray"]
     if args.device:
         argv += ["--device", args.device]
     if args.timeout is not None:
@@ -237,8 +237,8 @@ def _reexec_tray(args: argparse.Namespace, exc: Exception, log=None) -> int:
     """Run the tray with the system Python, where GTK bindings usually live.
 
     The project virtualenv has no system GTK bindings, so the same command
-    continues in the interpreter that provides them, with the package source
-    on PYTHONPATH.
+    continues in the interpreter that provides them, through the source
+    runner that maps the package name onto `src/`.
     """
 
     python = _tray_python()
@@ -249,18 +249,13 @@ def _reexec_tray(args: argparse.Namespace, exc: Exception, log=None) -> int:
         return 1
     import dasungctl
 
-    source = Path(dasungctl.__file__).resolve().parent.parent
-    env = dict(os.environ)
-    previous = env.get("PYTHONPATH")
-    env["PYTHONPATH"] = (
-        os.pathsep.join([str(source), previous]) if previous else str(source)
-    )
-    argv = [python, *_tray_arguments(args)]
+    runner = Path(dasungctl.__file__).resolve().parent / "_source_run.py"
+    argv = [python, str(runner), *_tray_arguments(args)]
     if log is not None:
         log.warn(f"GTK not available in this interpreter: restarting with {python}")
         log.close()
     try:
-        os.execve(python, argv, env)
+        os.execv(python, argv)
     except OSError as error:
         message = f"cannot start {python}: {error}"
         print(f"dasungctl tray: {message}", file=sys.stderr)

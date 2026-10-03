@@ -8,6 +8,9 @@
   package and the archived ghosting lab notes are no longer part of the
   public tree (they remain only on the maintainer's disk); the documentation
   that pointed to those notes was reworded.
+- Sources moved directly into `src/` (no package subdirectory):
+  `pyproject.toml` maps the `dasungctl` import name onto the directory and
+  `src/_source_run.py` runs the program from a checkout without installing.
 
 ## 0.1.1 — 2026-10-03
 

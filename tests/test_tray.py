@@ -885,8 +885,9 @@ def test_autostart_entry_uses_the_system_python_and_source_tree(
 
     entry = autostart_entry()
 
-    assert "-m dasungctl.tray" in entry
-    assert "PYTHONPATH=" in entry
+    assert "--module dasungctl.tray" in entry
+    assert "_source_run.py" in entry
+    assert "PYTHONPATH=" not in entry
     assert "X-GNOME-Autostart-enabled=true" in entry
 
 
@@ -909,15 +910,15 @@ def test_autostart_entry_quotes_arguments_with_spaces(monkeypatch, tmp_path):
     from dasungctl import tray
 
     source = tmp_path / "checkout dir" / "src"
+    runner = (source / "_source_run.py").resolve()
     monkeypatch.setattr(tray.Path, "home", classmethod(lambda cls: tmp_path))
-    monkeypatch.setattr(tray, "__file__", str(source / "dasungctl" / "tray.py"))
+    monkeypatch.setattr(tray, "__file__", str(source / "tray.py"))
     python = tmp_path / "venv dir" / "python3"
     monkeypatch.setattr(tray.shutil, "which", lambda _name: str(python))
 
     entry = tray.autostart_entry()
 
-    assert f'PYTHONPATH="{source.resolve()}"' in entry
-    assert f'"{python.resolve()}" -m dasungctl.tray' in entry
+    assert f'"{python.resolve()}" "{runner}" --module dasungctl.tray' in entry
 
 
 def test_autostart_path_follows_xdg_config_home(monkeypatch, tmp_path):
