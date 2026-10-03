@@ -134,7 +134,7 @@ writes the login entry. The menu and window controls are described in
 
 ## Status
 
-0.1.1, alpha. Monitor control is conservative and verified against the
+0.1.2, alpha. Monitor control is conservative and verified against the
 recorded captures; the ghost estimate is experimental and still needs
 calibration on the panel. See [docs/ghost-estimate.md](docs/ghost-estimate.md)
 for the known limitations.
