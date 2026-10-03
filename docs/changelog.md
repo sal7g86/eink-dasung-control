@@ -4,10 +4,10 @@
 
 ### Changed
 
-- Repository cleanup: the GitHub CI workflow, `.gitignore`, `MANIFEST.in`,
-  the developer `tools/` package and the archived ghosting lab notes are no
-  longer part of the public tree (they remain only on the maintainer's disk);
-  the documentation that pointed to those notes was reworded.
+- Repository cleanup: `.gitignore`, `MANIFEST.in`, the developer `tools/`
+  package and the archived ghosting lab notes are no longer part of the
+  public tree (they remain only on the maintainer's disk); the documentation
+  that pointed to those notes was reworded.
 
 ## 0.1.1 — 2026-10-03
 
