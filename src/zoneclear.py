@@ -292,16 +292,21 @@ class ZoneFlasher:
             )
 
     def _pass_through(self, window) -> None:
-        """Keep the overlay from swallowing clicks (best effort)."""
+        """Empty the overlay's input shape so clicks reach the desktop.
+
+        PyGObject binds `Gdk.Window.input_shape_combine_region` with the
+        offset arguments (`region, 0, 0`), unlike the C API's separate
+        parameters: calling it with the region only raises TypeError. Only a
+        missing pycairo is tolerated, so a signature change cannot hide again.
+        """
 
         try:
             import cairo
-
-            gdk_window = window.get_window()
-            if gdk_window is not None:
-                gdk_window.input_shape_combine_region(cairo.Region())
-        except Exception:
-            pass
+        except ImportError:  # pragma: no cover - GTK ships pycairo
+            return
+        gdk_window = window.get_window()
+        if gdk_window is not None:
+            gdk_window.input_shape_combine_region(cairo.Region(), 0, 0)
 
     def _next_phase(self):
         if not self._windows:

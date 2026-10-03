@@ -45,7 +45,8 @@ indicator labels (such as KDE), the label shows the current mode.
 `Ghost estimate…` opens the experimental ghost estimate
 (see [ghost-estimate.md](ghost-estimate.md)).
 Both windows stay on every virtual desktop on X11, so they follow the
-workspace in use.
+workspace in use; asking for an already-open window from the menu brings it
+back to the current one when the window manager did not keep it everywhere.
 
 Started from a terminal, the tray mirrors its log lines on stderr and Ctrl+C
 exits cleanly like the `Quit` menu entry; SIGTERM (for example at session

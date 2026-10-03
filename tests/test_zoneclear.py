@@ -1,5 +1,8 @@
 """Zone-clearing policy, flash sequence and settings; no GTK, no screen."""
 
+import sys
+import types
+
 import pytest
 
 from dasungctl.ghostwatch import GhostElement
@@ -7,6 +10,7 @@ from dasungctl.zoneclear import (
     DEFAULT_CLEAR,
     ClearError,
     ClearSettings,
+    ZoneFlasher,
     due_clear_elements,
     flash_phases,
     validate_clear,
@@ -105,3 +109,55 @@ def test_clear_settings_from_mapping_ignores_unknown_keys():
     assert settings.delay == 8.0
     assert settings.style == "single"
     assert settings.enabled is True
+
+
+class _FakeRegion:
+    """Stand-in for cairo.Region in the tests (pycairo is a GTK extra)."""
+
+
+def _install_fake_cairo(monkeypatch):
+    fake = types.ModuleType("cairo")
+    fake.Region = _FakeRegion
+    monkeypatch.setitem(sys.modules, "cairo", fake)
+
+
+def _flasher():
+    return ZoneFlasher({"Gtk": None, "Gdk": None, "GLib": None}, available=True)
+
+
+def test_pass_through_empties_the_overlay_input_shape(monkeypatch):
+    calls = []
+    gdk_window = types.SimpleNamespace(
+        input_shape_combine_region=(
+            lambda region, x, y: calls.append((region, x, y))
+        )
+    )
+    window = types.SimpleNamespace(get_window=lambda: gdk_window)
+    _install_fake_cairo(monkeypatch)
+
+    _flasher()._pass_through(window)
+
+    assert len(calls) == 1
+    region, x, y = calls[0]
+    assert isinstance(region, _FakeRegion)
+    assert (x, y) == (0, 0)
+
+
+def test_pass_through_tolerates_missing_pycairo(monkeypatch):
+    calls = []
+    gdk_window = types.SimpleNamespace(
+        input_shape_combine_region=lambda *args: calls.append(args)
+    )
+    window = types.SimpleNamespace(get_window=lambda: gdk_window)
+    monkeypatch.setitem(sys.modules, "cairo", None)
+
+    _flasher()._pass_through(window)
+
+    assert calls == []
+
+
+def test_pass_through_ignores_a_window_without_a_gdk_window(monkeypatch):
+    _install_fake_cairo(monkeypatch)
+    window = types.SimpleNamespace(get_window=lambda: None)
+
+    _flasher()._pass_through(window)  # must not raise

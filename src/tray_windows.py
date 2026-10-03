@@ -127,6 +127,58 @@ def _stick_to_all_desktops(window) -> bool:
     return True
 
 
+def _bring_to_current_desktop(window) -> bool:
+    """Move an already-open X11 window to the desktop in use.
+
+    The sticky request above covers workspace switches, but a window manager
+    may ignore it; when the user asks for the window again this brings it
+    here instead of leaving it behind. Like `_stick_to_all_desktops` it
+    writes the EWMH property directly, because Cinnamon/Muffin ignores the
+    equivalent client message (and `GdkX11.move_to_current_desktop`): sticky
+    windows are left alone (moving one would drop the sticky state), and on
+    Wayland the compositor decides.
+    """
+
+    gdk_window = window.get_window()
+    get_xid = getattr(gdk_window, "get_xid", None)
+    if get_xid is None:
+        return False
+    try:
+        from Xlib import Xatom, display as xdisplay, error as xerror
+    except ImportError:
+        return False
+    try:
+        connection = xdisplay.Display()
+    except (xerror.DisplayError, OSError):
+        return False
+    try:
+        target = connection.create_resource_object("window", get_xid())
+        desktop = target.get_full_property(
+            connection.intern_atom("_NET_WM_DESKTOP"), Xatom.CARDINAL
+        )
+        if (
+            desktop is not None
+            and desktop.value
+            and desktop.value[0] == 0xFFFFFFFF
+        ):
+            return False
+        current = connection.screen().root.get_full_property(
+            connection.intern_atom("_NET_CURRENT_DESKTOP"), Xatom.CARDINAL
+        )
+        if current is None or not current.value:
+            return False
+        target.change_property(
+            connection.intern_atom("_NET_WM_DESKTOP"),
+            Xatom.CARDINAL,
+            32,
+            [int(current.value[0])],
+        )
+        connection.sync()
+    finally:
+        connection.close()
+    return True
+
+
 def _stick_on_map(window, _event) -> bool:
     """`map-event` handler: keep the window on every virtual desktop (X11)."""
 
@@ -181,6 +233,9 @@ class ControlsWindow:
         title_box.pack_start(self.subtitle, False, False, 0)
         header.set_custom_title(title_box)
         window.set_titlebar(header)
+        # GTK clears the window title when a custom titlebar is set (3.24):
+        # put it back for the WM, the window list and Alt+Tab.
+        window.set_title("DASUNG monitor control")
 
         content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         content.set_border_width(12)
@@ -390,11 +445,12 @@ class ControlsWindow:
     # -- view updates ------------------------------------------------------
 
     def present(self) -> None:
-        """First show reveals every widget; later calls just raise the window.
+        """First show reveals every widget; later calls raise the window.
 
         show_all() is recursive and re-shows hidden children, so it runs only
         once: after that, present() reopens the hidden window while keeping
-        the spinner and the status icon in the state update() computed.
+        the spinner and the status icon in the state update() computed, and
+        brings it back to the workspace in use when needed.
         """
 
         if not self._mapped_once:
@@ -402,6 +458,8 @@ class ControlsWindow:
             self._mapped_once = True
             self.spinner.hide()
             self.status_icon.hide()
+        else:
+            _bring_to_current_desktop(self.window)
         self.window.present()
 
     def update(self) -> None:
@@ -673,6 +731,9 @@ class GhostWindow:
         self.estimate_button = self._estimate_button()
         header.pack_end(self.estimate_button)
         window.set_titlebar(header)
+        # GTK clears the window title when a custom titlebar is set (3.24):
+        # put it back for the WM, the window list and Alt+Tab.
+        window.set_title("DASUNG ghost estimate")
 
         content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         content.set_border_width(12)
@@ -992,11 +1053,13 @@ class GhostWindow:
         self._apply_clear_settings()
 
     def present(self) -> None:
-        """First show reveals every widget; later calls just raise the window."""
+        """First show reveals every widget; later calls raise the window."""
 
         if not self._mapped_once:
             self.window.show_all()
             self._mapped_once = True
+        else:
+            _bring_to_current_desktop(self.window)
         self.window.present()
 
     def _on_delete(self, *_args):
