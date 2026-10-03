@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.1.1 — 2026-10-03
+
+The README animation and screenshots were recorded on version 0.1 and do not
+show the changes below yet.
+
+### Added
+
+- `Ghost estimate…`: a `Stop estimate` / `Start estimate` button in the
+  header pauses the sampling — and with it the automatic clearing, which
+  runs after a fresh sample — while keeping the last result on screen. The
+  choice is remembered in the state file across tray restarts, like the
+  other switches; `ghost.enabled` in the config stays the master switch.
+
+### Changed
+
+- Documentation cleanup: the release checklist moved into
+  `docs/development.md` (the separate `docs/releasing.md` is gone), and the
+  ghosting lab notes moved to `docs/archive/ghosting-experiments.md`, off
+  the README's documentation table.
+
 ## 0.1.0 — 2026-10-02
 
 First public release.
@@ -29,7 +49,7 @@ First public release.
   `paperlike-hd-13.3` profile only.
 - Protocol documentation (`docs/protocol.md`), distilled official-client
   static analysis (`docs/research-findings.md`) and the physical ghosting
-  measurements (`docs/ghosting-experiments.md`).
+  measurements (`docs/archive/ghosting-experiments.md`).
 
 ### Changed
 

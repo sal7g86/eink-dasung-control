@@ -622,6 +622,8 @@ class GhostWindow:
         title_box.pack_start(title, False, False, 0)
         title_box.pack_start(subtitle, False, False, 0)
         header.set_custom_title(title_box)
+        self.estimate_button = self._estimate_button()
+        header.pack_end(self.estimate_button)
         window.set_titlebar(header)
 
         content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
@@ -721,6 +723,60 @@ class GhostWindow:
         inner.pack_start(Gtk.Label(label=label), False, False, 0)
         button.add(inner)
         return button
+
+    def _estimate_button(self):
+        """Header button that stops and restarts the estimate's sampling."""
+
+        Gtk = self.Gtk
+        button = Gtk.Button()
+        inner = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self._estimate_icon_name = "media-playback-pause-symbolic"
+        self.estimate_icon = Gtk.Image.new_from_icon_name(
+            self._estimate_icon_name, Gtk.IconSize.BUTTON
+        )
+        self.estimate_label = Gtk.Label(label="Stop estimate")
+        inner.pack_start(self.estimate_icon, False, False, 0)
+        inner.pack_start(self.estimate_label, False, False, 0)
+        button.add(inner)
+        button.connect("clicked", self._on_estimate_clicked)
+        return button
+
+    def _on_estimate_clicked(self, _button) -> None:
+        """Flip the running state and let the tray persist the choice."""
+
+        running = bool(self.app.controller.state.ghost_estimate)
+        self.app.set_ghost_estimate(not running)
+
+    def _sync_estimate_controls(self, watcher) -> None:
+        """Mirror the running state into the header button and its tooltip."""
+
+        available = watcher is not None and bool(watcher.enabled)
+        running = bool(self.app.controller.state.ghost_estimate)
+        if not available:
+            label = "Start estimate"
+            icon = "media-playback-start-symbolic"
+            tooltip = (
+                "Disabled in the configuration"
+                if watcher is not None
+                else "The ghost estimate is unavailable"
+            )
+        elif running:
+            label = "Stop estimate"
+            icon = "media-playback-pause-symbolic"
+            tooltip = (
+                "Stop sampling; the last result stays on screen and the "
+                "automatic clearing pauses too"
+            )
+        else:
+            label = "Start estimate"
+            icon = "media-playback-start-symbolic"
+            tooltip = "Resume sampling and the automatic clearing"
+        self._set(self.estimate_label, label)
+        if self._estimate_icon_name != icon:
+            self._estimate_icon_name = icon
+            self.estimate_icon.set_from_icon_name(icon, self.Gtk.IconSize.BUTTON)
+        self.estimate_button.set_sensitive(available)
+        self.estimate_button.set_tooltip_text(tooltip)
 
     # -- clearing settings editor -----------------------------------------
 
@@ -946,6 +1002,7 @@ class GhostWindow:
             self._set(self.status, "")
             self.preview.clear()
             self._sync_clear_controls(None)
+            self._sync_estimate_controls(None)
             return
         result = watcher.result
         signature = (
@@ -953,6 +1010,7 @@ class GhostWindow:
             watcher.error,
             watcher.capture_failed,
             getattr(self.app, "_clear_note", None),
+            bool(self.app.controller.state.ghost_estimate),
         )
         if signature == self._signature and self._mapped_once:
             return
@@ -992,6 +1050,7 @@ class GhostWindow:
             self._set(self.elements, self._element_text(result.elements))
             self._show_preview(watcher, result)
         self._sync_clear_controls(result)
+        self._sync_estimate_controls(watcher)
         self._show_status(watcher)
 
     def _show_preview(self, watcher, result: GhostResult) -> None:
@@ -1025,6 +1084,8 @@ class GhostWindow:
         elif watcher.error:
             text = watcher.error
             error = True
+        elif getattr(watcher, "paused", False):
+            text = "Estimate stopped — press Start estimate"
         elif getattr(watcher, "zone_error", None):
             text = watcher.zone_error
         elif getattr(self.app, "_clear_note", None):

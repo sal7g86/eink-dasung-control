@@ -301,6 +301,11 @@ class TrayState:
     # state file, like the auto-refresh timer.
     ghost_clear: bool = False
     ghost_clear_settings: dict = field(default_factory=dict)
+    # The ghost estimate's runtime switch, flipped by the `Ghost estimate…`
+    # window: on by default and remembered in the state file. The config's
+    # `ghost.enabled` remains the master switch that can disable the feature
+    # entirely.
+    ghost_estimate: bool = True
 
     @property
     def mode_name(self) -> str:
@@ -515,6 +520,8 @@ class TrayController:
             merged["enabled"] = bool(merged["enabled"])
             self.state.ghost_clear_settings = merged
             self.state.ghost_clear = merged["enabled"]
+        if "ghost_estimate" in restored:
+            self.state.ghost_estimate = restored["ghost_estimate"]
         if note:
             self.state.message = note
             self.log.warn(note)
@@ -560,6 +567,7 @@ class TrayController:
             self.state.autorefresh,
             self.state.interval,
             self.state.ghost_clear,
+            self.state.ghost_estimate,
             tuple(sorted(self.state.ghost_clear_settings.items())),
         )
         if key == self._stored_key:
@@ -571,6 +579,7 @@ class TrayController:
                     "autorefresh": self.state.autorefresh,
                     "autorefresh_interval": self.state.interval,
                     "ghost_clear": dict(self.state.ghost_clear_settings),
+                    "ghost_estimate": self.state.ghost_estimate,
                 },
                 panel=self.panel,
             )
@@ -631,6 +640,16 @@ class TrayController:
         merged["enabled"] = self.state.ghost_clear
         self.state.ghost_clear_settings = merged
         self.state.message = "ghost clearing settings updated"
+        self.log.info(self.state.message)
+        self._store_last()
+
+    def set_ghost_estimate(self, running: bool) -> None:
+        """Stop or restart the ghost estimate and persist the choice."""
+
+        self.state.ghost_estimate = bool(running)
+        self.state.message = (
+            "ghost estimate started" if running else "ghost estimate stopped"
+        )
         self.log.info(self.state.message)
         self._store_last()
 
@@ -1267,6 +1286,14 @@ class TrayApp:
         self._ghost_window.present()
         self._ghost_window.follow(self.watcher)
 
+    def set_ghost_estimate(self, running: bool) -> None:
+        """Stop or restart sampling from the ghost window and remember it."""
+
+        self.controller.set_ghost_estimate(running)
+        if self.watcher is not None:
+            self.watcher.set_paused(not running)
+        self._refresh_ghost_view()
+
     def _refresh_action(self, hard: bool) -> bool:
         """Send a refresh and tell the ghost model the panel is clean.
 
@@ -1303,6 +1330,11 @@ class TrayApp:
         )
         # The diagnostic window is live: never back off while it is open.
         watcher.set_force_base(visible)
+        # The window's Stop/Start button: a stopped estimate never samples,
+        # so the automatic clearing (which runs after a fresh sample) pauses
+        # too while the last result stays on screen. The controller's state
+        # is the persisted source, also restored at startup.
+        watcher.set_paused(not self.controller.state.ghost_estimate)
         if self._clearer.busy:
             # The overlay is not content: never let a sample see the flash.
             if visible:

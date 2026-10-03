@@ -81,7 +81,10 @@ preferences:
 - `autorefresh` and `autorefresh_interval`: a timer left on comes back on with
   the same interval;
 - `ghost_clear`: the automatic-clearing switch and the whole clearing-settings
-  object edited in `Ghost estimate…`.
+  object edited in `Ghost estimate…`;
+- `ghost_estimate`: whether the ghost estimate was running; the Stop/Start
+  button in `Ghost estimate…` writes it, so a stopped estimate stays stopped
+  across restarts (`ghost.enabled` in the config is the master switch).
 
 While the tray runs it also reads the display fields every few seconds
 (`POLL_SECONDS`), so changes made with the monitor's physical buttons update

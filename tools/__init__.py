@@ -1,5 +1,4 @@
-"""Developer tools: offline photo measurement.
+"""Developer tools: offline helpers.
 
-Nothing in this package may open the serial port. `ghost_photo.py` only reads
-image files.
+Nothing in this package may open the serial port or touch serial/USB.
 """

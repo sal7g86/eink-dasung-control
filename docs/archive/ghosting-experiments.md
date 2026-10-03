@@ -3,10 +3,9 @@
 This is the English summary of the project's ghosting lab notes (2026-09-25
 to 2026-10-01). It documents the physical measurements, the rejected
 approaches and the reasoning behind the current estimate-driven zone
-clearing ([ghost-estimate.md](ghost-estimate.md)). The tools cited in the
+clearing ([ghost-estimate.md](../ghost-estimate.md)). The tools cited in the
 older procedures (`zone_calibrate`, `ghost_test`, the TUI) were removed on
-2026-09-26 and are not available in this repository; the photo analysis tool
-`tools/ghost_photo.py` still ships.
+2026-09-26 and are not available in this repository.
 
 ## Purpose
 

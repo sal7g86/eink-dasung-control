@@ -133,6 +133,15 @@ def test_ghost_clear_preference_round_trip(tmp_path):
     assert "autorefresh" not in saved
 
 
+def test_ghost_estimate_preference_round_trip(tmp_path):
+    path = tmp_path / "last-state.json"
+    save_last(_info(), path, prefs={"ghost_estimate": False})
+
+    saved = load_last(path)
+
+    assert saved["ghost_estimate"] is False
+
+
 def test_removed_ghost_clear_values_are_rejected(tmp_path):
     path = tmp_path / "last-state.json"
     path.write_text(json.dumps({"ghost_clear": True}))
@@ -162,6 +171,8 @@ def test_removed_ghost_clear_values_are_rejected(tmp_path):
         json.dumps({"ghost_clear": {"white_ms": 0}}),
         json.dumps({"ghost_clear": {"delay": -1}}),
         json.dumps({"ghost_clear": {"nope": 1}}),
+        json.dumps({"ghost_estimate": "off"}),
+        json.dumps({"ghost_estimate": 1}),
         json.dumps({"nope": 1}),
     ),
 )

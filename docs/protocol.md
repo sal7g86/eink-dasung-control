@@ -392,7 +392,7 @@ approved targeted test: the monitor acknowledged the frame
 (`5FF50301000000000000A0FA`) and the user reported a clean screen with no
 ghosting. It did not measurably outperform the soft refresh for the light
 ghost used in that test; details and photos are summarized in
-[`ghosting-experiments.md`](ghosting-experiments.md).
+[`archive/ghosting-experiments.md`](archive/ghosting-experiments.md).
 
 ## Official-client static evidence
 

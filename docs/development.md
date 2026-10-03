@@ -12,11 +12,10 @@
 - `tests/` — offline tests only: fakes, recorded frames, no serial device and
   no hardware. `tests/conftest.py` points every XDG directory at a temporary
   tree.
-- `tools/` — offline developer tools (`ghost_photo.py` measures ghosting on
-  photos with ImageMagick); they must never import `dasungctl.transport` or
-  touch serial/USB.
-- `docs/` — the project documentation; the repository root keeps only
-  `README.md`.
+- `tools/` — offline developer tools; they must never import
+  `dasungctl.transport` or touch serial/USB.
+- `docs/` — the project documentation; `docs/archive/` keeps the historical
+  lab notes; the repository root keeps only `README.md`.
 
 ## Environment and commands
 
@@ -45,9 +44,9 @@ windows from `tray_windows`) against `tests.fakes.FakeTransport` and enter
 the open questions; keep it in sync when changing `protocol.py` or
 `client.py`. The distilled static analysis of the official clients is in
 `docs/research-findings.md`, and the physical ghosting measurements are in
-`docs/ghosting-experiments.md`. Review the exact frame and its evidence
-before sending state-changing frames to the hardware; only one process can
-hold the monitor at a time (lock in `$XDG_STATE_HOME/dasungctl/`).
+`docs/archive/ghosting-experiments.md`. Review the exact frame and its
+evidence before sending state-changing frames to the hardware; only one
+process can hold the monitor at a time (lock in `$XDG_STATE_HOME/dasungctl/`).
 
 ## Panel profiles
 
@@ -57,22 +56,6 @@ temperature mapping, read fields and limits — lives in a `PanelProfile` in
 reads it through `get_panel()`. Adding a model is described in
 [docs/panels.md](panels.md); never copy calibrations between models, and
 keep tests in `tests/test_panels.py` in step with the tables.
-
-## Ghost photos
-
-`tools/ghost_photo.py` crops the same panel area in every photo and reports
-simple gray-level statistics (a uniform canvas with visible ghosting has a
-higher standard deviation). The reference photo lets the tool subtract
-illumination/JPEG noise; the crop must be identical across photos.
-
-```console
-.venv/bin/python tools/ghost_photo.py --crop 300x300+400+300 \
-  --reference clean.jpg --noise-reference clean-repeat.jpg \
-  --json before.jpg after.jpg
-```
-
-See [ghosting-experiments.md](ghosting-experiments.md) for the measurement
-method that uses it.
 
 ## Wayland backend status
 
@@ -85,4 +68,37 @@ compositor permission dialogs make the first sample interactive.
 
 ## Releasing
 
-See [releasing.md](releasing.md).
+The release history lives in [changelog.md](changelog.md); this is the
+checklist for cutting a release. Every user-visible feature or change is
+recorded in the changelog, under the section of the version being prepared,
+as soon as it is made; when the README animation or the screenshots no
+longer match the interface, say so there too.
+
+1. Update `version` in `pyproject.toml` (semantic versioning).
+2. Check the changelog section for that version and give it the release date.
+3. Run the full verification:
+
+   ```console
+   .venv/bin/python -m pytest -q
+   uvx ruff check src tests tools --select F,E9
+   ```
+
+4. Review the tree for files that must not be published (`git status`,
+   `.gitignore`); official-client artifacts, research binaries and the
+   maintainer-local tools stay outside version control.
+5. Commit the release state.
+6. Tag and push:
+
+   ```console
+   git tag -a v0.1.1 -m "dasungctl 0.1.1"
+   git push origin main --follow-tags
+   ```
+
+   The repository needs a remote first:
+
+   ```console
+   git remote add origin git@github.com:sal7g86/eink-dasung-control.git
+   ```
+
+7. Create the GitHub Release for the tag, using the changelog section as the
+   release notes. GitHub attaches the source archives automatically.

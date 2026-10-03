@@ -764,6 +764,9 @@ class GhostWatcher:
             raise ValueError("threshold must be in 0..100")
         self.capturer = capturer
         self.enabled = bool(enabled)
+        # Runtime pause from the `Ghost estimate…` window: sampling stops and
+        # `due()` never fires, but the model and the last result stay intact.
+        self.paused = False
         self.interval = float(interval)
         self.max_interval = max(self.interval, float(max_interval))
         self.threshold = float(threshold)
@@ -847,10 +850,15 @@ class GhostWatcher:
 
         self._force_base = bool(active)
 
+    def set_paused(self, active: bool) -> None:
+        """Stop or resume sampling; the capture session stays open."""
+
+        self.paused = bool(active)
+
     def due(self, now: float | None = None) -> bool:
         """True when a new sample should be taken."""
 
-        if not self.enabled or self.capture_failed:
+        if not self.enabled or self.paused or self.capture_failed:
             return False
         moment = self._clock() if now is None else now
         if self._last_sample is None:
@@ -874,9 +882,9 @@ class GhostWatcher:
             self._busy = False
 
     def _sample(self) -> GhostResult | None:
-        self._last_sample = self._clock()
-        if not self.enabled or self.capture_failed:
+        if not self.enabled or self.paused or self.capture_failed:
             return None
+        self._last_sample = self._clock()
         if self.capturer is None:
             self.error = "no screen capture backend for this session"
             self.capture_failed = True

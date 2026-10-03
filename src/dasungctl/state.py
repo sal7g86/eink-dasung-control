@@ -30,9 +30,15 @@ APPLY_ORDER = LAST_FIELDS
 LAST_LIMITS = DEFAULT_PANEL.limits
 
 # Extra keys accepted in the JSON file: the save timestamp and the tray
-# preferences (auto-refresh on/off and interval, ghost auto-clear on/off),
-# which are not monitor fields and never reach the wire through apply_fields.
-PREF_FIELDS = ("autorefresh", "autorefresh_interval", "ghost_clear")
+# preferences (auto-refresh on/off and interval, ghost auto-clear on/off,
+# ghost estimate running/stopped), which are not monitor fields and never
+# reach the wire through apply_fields.
+PREF_FIELDS = (
+    "autorefresh",
+    "autorefresh_interval",
+    "ghost_clear",
+    "ghost_estimate",
+)
 _UNKNOWN_KEYS = frozenset({"saved_at"})
 
 
@@ -94,9 +100,10 @@ def save_last(
 ) -> Path:
     """Write the known fields of `info` as JSON and return the file path.
 
-    `prefs` adds the optional tray preferences (auto-refresh on/off and
-    interval), so they survive tray restarts together with the monitor
-    fields; when omitted, the file keeps only the monitor fields.
+    `prefs` adds the optional tray preferences (auto-refresh timer, ghost
+    clearing and the estimate's running state), so they survive tray restarts
+    together with the monitor fields; when omitted, the file keeps only the
+    monitor fields.
     """
 
     profile = get_panel(panel)
@@ -192,7 +199,7 @@ def _validated_pref(field: str, value: Any, target: Path) -> Any:
             return validate_clear(value, prefix="ghost_clear")
         except ClearError as exc:
             raise StateError(f"{target}: {exc}") from exc
-    if field == "autorefresh":
+    if field in ("autorefresh", "ghost_estimate"):
         if not isinstance(value, bool):
             raise StateError(f"{target}: field {field!r} must be true or false")
         return value

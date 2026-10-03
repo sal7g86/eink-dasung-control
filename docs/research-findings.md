@@ -129,7 +129,7 @@ Its builder accepts only options 0 and 1 for this command. These originated as
 static constructions. A later controlled target test confirmed that option
 `0` causes a visible refresh; option `1` was sent once on 2026-09-25 and was
 acknowledged (see [protocol.md](protocol.md) and
-[ghosting-experiments.md](ghosting-experiments.md)).
+[archive/ghosting-experiments.md](archive/ghosting-experiments.md)).
 
 No refresh call site in the three analyzed clients passes coordinates,
 dimensions, a rectangle object, or a non-zero six-byte field. Searches for
@@ -281,4 +281,5 @@ approximation (an X11 overlay that flashed only the changed screen areas and
 never used the serial channel) was removed on 2026-09-26; a different,
 estimate-driven version was reintroduced later (see
 [ghost-estimate.md](ghost-estimate.md)), and the archived measurements of the
-first attempt are in [ghosting-experiments.md](ghosting-experiments.md).
+first attempt are in
+[archive/ghosting-experiments.md](archive/ghosting-experiments.md).

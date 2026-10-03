@@ -324,11 +324,13 @@ def test_auto_refresh_preferences_are_stored(monkeypatch):
             "autorefresh": False,
             "autorefresh_interval": 30.0,
             "ghost_clear": dict(DEFAULT_CLEAR),
+            "ghost_estimate": True,
         },
         {
             "autorefresh": True,
             "autorefresh_interval": 30.0,
             "ghost_clear": dict(DEFAULT_CLEAR),
+            "ghost_estimate": True,
         },
     ]
 
@@ -348,9 +350,32 @@ def test_ghost_clear_preference_is_stored(monkeypatch):
             "autorefresh": False,
             "autorefresh_interval": 300.0,
             "ghost_clear": {**DEFAULT_CLEAR, "enabled": True},
+            "ghost_estimate": True,
         }
     ]
     assert controller.state.ghost_clear is True
+
+
+def test_ghost_estimate_preference_is_stored(monkeypatch):
+    saved = []
+    monkeypatch.setattr(
+        "dasungctl.tray.save_last",
+        lambda info, prefs=None, **kwargs: saved.append(prefs),
+    )
+    controller, _transport = _controller()
+
+    controller.set_ghost_estimate(False)
+
+    assert saved == [
+        {
+            "autorefresh": False,
+            "autorefresh_interval": 300.0,
+            "ghost_clear": dict(DEFAULT_CLEAR),
+            "ghost_estimate": False,
+        }
+    ]
+    assert controller.state.ghost_estimate is False
+    assert "stopped" in controller.state.message
 
 
 def test_ghost_clear_settings_are_merged_and_stored(monkeypatch):
@@ -442,6 +467,25 @@ def test_restore_brings_back_the_ghost_clear_switch(monkeypatch):
     assert controller.state.ghost_clear is True
     assert controller.state.ghost_clear_settings["enabled"] is True
     assert controller.state.ghost_clear_settings["white_ms"] == 15
+
+
+def test_restore_brings_back_the_ghost_estimate_switch(monkeypatch):
+    monkeypatch.setattr(
+        "dasungctl.tray.load_last",
+        lambda **kwargs: {"ghost_estimate": False},
+    )
+    controller, _transport = _controller()
+
+    assert controller.restore() is True
+
+    assert controller.state.ghost_estimate is False
+
+
+def test_ghost_estimate_defaults_to_running(monkeypatch):
+    monkeypatch.setattr("dasungctl.tray.load_last", lambda **kwargs: None)
+    controller, _transport = _controller()
+
+    assert controller.state.ghost_estimate is True
 
 
 def test_restore_merges_the_saved_clear_settings(monkeypatch):
@@ -941,6 +985,7 @@ def _ghost_app(origin=(3760, 533), elements=(), available=True):
         state=types.SimpleNamespace(
             ghost_clear=False,
             ghost_clear_settings=dict(DEFAULT_CLEAR),
+            ghost_estimate=True,
         )
     )
     app._ghost_window = None
@@ -1007,6 +1052,67 @@ def test_auto_clear_waits_for_the_delay():
     app._maybe_ghost_clear_auto()
 
     assert app._clearer.calls == []
+
+
+class _FakeWatcher:
+    """Minimal GhostWatcher stand-in for the ticking tests."""
+
+    def __init__(self, enabled=True):
+        self.enabled = enabled
+        self.paused = False
+        self.error = None
+        self.capture_failed = False
+        self.model = None
+        self.result = None
+        self.samples = 0
+        self.force_base = None
+
+    def set_force_base(self, active):
+        self.force_base = active
+
+    def set_paused(self, active):
+        self.paused = bool(active)
+
+    def due(self):
+        return self.enabled and not self.paused
+
+    def sample(self):
+        self.samples += 1
+        return self.result
+
+    def maybe_alert(self):
+        return None
+
+
+def test_ghost_tick_honours_the_stopped_estimate():
+    app = _ghost_app()
+    watcher = _FakeWatcher()
+    app.watcher = watcher
+    app.controller.state.ghost_estimate = False
+
+    app._ghost_tick()
+
+    assert watcher.paused is True
+    assert watcher.samples == 0
+
+    app.controller.state.ghost_estimate = True
+    app._ghost_tick()
+
+    assert watcher.paused is False
+    assert watcher.samples == 1
+
+
+def test_app_set_ghost_estimate_pauses_the_watcher():
+    app = _ghost_app()
+    watcher = _FakeWatcher()
+    app.watcher = watcher
+    recorded = []
+    app.controller.set_ghost_estimate = recorded.append
+
+    app.set_ghost_estimate(False)
+
+    assert recorded == [False]
+    assert watcher.paused is True
 
 
 def test_test_flash_uses_the_center_of_the_monitor():

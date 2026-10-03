@@ -11,8 +11,8 @@ compare where the estimator thinks the ghosts are with the physical panel.
 
 The estimate is an **experimental** feature in 0.1: the model constants are
 assumptions to calibrate against the panel, and only a photo of the panel can
-confirm a real ghost (the `tools/ghost_photo.py` workflow described in
-[development.md](development.md)).
+confirm a real ghost (the measurement approach is described in
+[archive/ghosting-experiments.md](archive/ghosting-experiments.md)).
 
 ## How it works
 
@@ -22,6 +22,13 @@ erased; a dark pixel that is merely lighter than intended is not counted. It
 sees only what happened while the tray was running, and the monitor's
 physical `C` button is invisible to it: press `Reset estimate` after using
 it. The `Retry capture` button recovers after a refused screen share.
+
+The header's `Stop estimate` button pauses the sampling — and with it the
+automatic clearing, which runs after a fresh sample — while the last result
+stays on screen; `Start estimate` resumes both, and the choice is remembered
+across tray restarts like the other switches. `ghost.enabled` in the
+configuration remains the master switch that can disable the feature
+entirely.
 
 Each area carries the application class that was over it when the ghost
 formed (`konsole (fullscreen)`, `firefox`), so the list answers "which window
@@ -154,4 +161,4 @@ These are the non-obvious points future changes must keep in mind.
 
 The physical measurements that led here — refresh efficacy, the removed grid
 and adaptive clearing modes, the rejected low-amplitude maintenance — are
-summarized in [ghosting-experiments.md](ghosting-experiments.md).
+summarized in [archive/ghosting-experiments.md](archive/ghosting-experiments.md).

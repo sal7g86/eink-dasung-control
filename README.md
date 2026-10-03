@@ -129,13 +129,12 @@ writes the login entry. The menu and window controls are described in
 | [docs/ghost-estimate.md](docs/ghost-estimate.md) | the experimental ghost estimate and zone clearing |
 | [docs/protocol.md](docs/protocol.md) | confirmed serial protocol, captures, open questions |
 | [docs/research-findings.md](docs/research-findings.md) | distilled official-client static analysis |
-| [docs/ghosting-experiments.md](docs/ghosting-experiments.md) | physical ghosting measurements and rejected approaches |
 | [docs/development.md](docs/development.md) | tests, lint, tools, release |
 | [docs/changelog.md](docs/changelog.md) | release history |
 
 ## Status
 
-0.1.0, alpha. Monitor control is conservative and verified against the
+0.1.1, alpha. Monitor control is conservative and verified against the
 recorded captures; the ghost estimate is experimental and still needs
 calibration on the panel. See [docs/ghost-estimate.md](docs/ghost-estimate.md)
 for the known limitations.

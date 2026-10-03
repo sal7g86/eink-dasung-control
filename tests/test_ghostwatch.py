@@ -379,6 +379,26 @@ def test_watcher_disabled_never_samples():
     assert watcher.sample() is None
 
 
+def test_watcher_paused_never_samples_and_resumes():
+    clock = FakeClock()
+    capturer = FakeCapturer(ghost_frames())
+    watcher = make_watcher(capturer, clock)
+
+    watcher.sample()
+    assert capturer.grabs == 1
+
+    watcher.set_paused(True)
+    clock.advance(5.0)
+    assert watcher.due() is False
+    assert watcher.sample() is None
+    assert capturer.grabs == 1
+
+    watcher.set_paused(False)
+    assert watcher.due() is True
+    assert watcher.sample() is not None
+    assert capturer.grabs == 2
+
+
 def test_watcher_keeps_capture_failures_and_retries():
     clock = FakeClock()
     capturer = FakeCapturer()
