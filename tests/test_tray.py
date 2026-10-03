@@ -852,31 +852,25 @@ class _FakeDisplayError(Exception):
 
 
 class _FakeXWindow:
-    def __init__(self):
-        self.properties = []
-        self.desktop = None  # None = _NET_WM_DESKTOP not set yet
-
-    def change_property(self, atom, type_atom, format, data):
-        self.properties.append((atom, type_atom, format, data))
-
-    def get_full_property(self, atom, type_atom):
-        if self.desktop is None:
-            return None
-        return types.SimpleNamespace(value=[self.desktop])
+    """The window an EWMH client message is addressed to."""
 
 
 class _FakeXRoot:
     def __init__(self):
         self.current_desktop = 0
+        self.events = []
 
     def get_full_property(self, atom, type_atom):
         if self.current_desktop is None:
             return None
         return types.SimpleNamespace(value=[self.current_desktop])
 
+    def send_event(self, event, event_mask):
+        self.events.append((event, event_mask))
+
 
 class _FakeXConnection:
-    """python-xlib stand-in recording property changes and reads."""
+    """python-xlib stand-in recording EWMH client messages and reads."""
 
     def __init__(self):
         self.target = _FakeXWindow()
@@ -907,9 +901,17 @@ def _install_fake_xlib(monkeypatch, display_factory):
     """Install a python-xlib stand-in whose Display() runs `display_factory`."""
 
     fake = types.ModuleType("Xlib")
+    fake.X = types.SimpleNamespace(
+        SubstructureRedirectMask=1, SubstructureNotifyMask=2
+    )
     fake.Xatom = types.SimpleNamespace(CARDINAL=0xCA4D)
     fake.display = types.SimpleNamespace(Display=display_factory)
     fake.error = types.SimpleNamespace(DisplayError=_FakeDisplayError)
+    fake.protocol = types.SimpleNamespace(
+        event=types.SimpleNamespace(
+            ClientMessage=lambda **kwargs: types.SimpleNamespace(**kwargs)
+        )
+    )
     monkeypatch.setitem(sys.modules, "Xlib", fake)
 
 
@@ -919,17 +921,17 @@ def _fake_window(xid=0x1234):
     )
 
 
-def test_windows_are_stuck_to_every_desktop_through_the_ewmh_property(monkeypatch):
+def test_windows_are_stuck_to_every_desktop_through_the_ewmh_message(monkeypatch):
     connection = _FakeXConnection()
     _install_fake_xlib(monkeypatch, lambda: connection)
 
     assert _stick_to_all_desktops(_fake_window()) is True
 
-    (atom, type_atom, format, data), = connection.target.properties
-    assert atom == 0xD00D  # _NET_WM_DESKTOP
-    assert type_atom == 0xCA4D  # CARDINAL
-    assert format == 32
-    assert data == [0xFFFFFFFF]
+    event, mask = connection.root.events[0]
+    assert event.client_type == 0xD00D  # _NET_WM_DESKTOP
+    assert event.window is connection.target
+    assert event.data == (32, [0xFFFFFFFF, 0, 0, 0, 0])
+    assert mask == 3  # redirect | notify
     assert connection.xid == 0x1234
     assert connection.synced is True
     assert connection.closed is True
@@ -968,38 +970,27 @@ def test_map_handler_sticks_and_keeps_the_gtk_event_flow(monkeypatch):
     assert seen == ["window"]
 
 
-def test_requested_window_moves_back_to_the_current_desktop(monkeypatch):
+def test_requested_window_moves_to_the_current_desktop_then_sticks(monkeypatch):
     connection = _FakeXConnection()
-    connection.target.desktop = 1  # still open on another desktop
     connection.root.current_desktop = 2
     _install_fake_xlib(monkeypatch, lambda: connection)
 
     assert _bring_to_current_desktop(_fake_window()) is True
 
-    atom, type_atom, format, data = connection.target.properties[-1]
-    assert atom == 0xD00D  # _NET_WM_DESKTOP
-    assert (type_atom, format, data) == (0xCA4D, 32, [2])
+    first, second = connection.root.events
+    assert first[0].data == (32, [2, 0, 0, 0, 0])
+    assert second[0].data == (32, [0xFFFFFFFF, 0, 0, 0, 0])
+    assert first[0].client_type == second[0].client_type == 0xD00D
     assert connection.closed is True
-
-
-def test_sticky_window_is_not_moved_when_requested(monkeypatch):
-    connection = _FakeXConnection()
-    connection.target.desktop = 0xFFFFFFFF
-    connection.root.current_desktop = 2
-    _install_fake_xlib(monkeypatch, lambda: connection)
-
-    assert _bring_to_current_desktop(_fake_window()) is False
-    assert connection.target.properties == []
 
 
 def test_bring_to_current_needs_a_current_desktop(monkeypatch):
     connection = _FakeXConnection()
-    connection.target.desktop = 1
     connection.root.current_desktop = None
     _install_fake_xlib(monkeypatch, lambda: connection)
 
     assert _bring_to_current_desktop(_fake_window()) is False
-    assert connection.target.properties == []
+    assert connection.root.events == []
 
 
 def test_bring_to_current_is_a_noop_without_python_xlib(monkeypatch):

@@ -88,25 +88,19 @@ def install_window_css(Gtk, Gdk) -> None:
     )
 
 
-def _stick_to_all_desktops(window) -> bool:
-    """Show an X11 window on every virtual desktop.
+def _x11_desktop_message(xid, value) -> bool:
+    """Send the EWMH `_NET_WM_DESKTOP` client message to the window manager.
 
-    GTK3 dropped the sticky API (GTK2's `gtk_window_stick`), so this sets the
-    EWMH `_NET_WM_DESKTOP` property to 0xFFFFFFFF ("all desktops"), the value
-    the window manager reads: Cinnamon/Muffin ignores the equivalent
-    `_NET_WM_DESKTOP` client message but honours this property change. It is
-    best-effort by design: Wayland has no client API for it, python-xlib is
-    an optional dependency, and a missing library, a non-X11 window or an
-    unreachable display simply leave the window on the desktop where it was
-    opened.
+    Cinnamon/Muffin acts on the client message but ignores the equivalent
+    property change (a property written by the client is only echoed back by
+    `wmctrl`, so it looks set while nothing moves), which is why both the
+    sticky request and the move-to-current one go through here. Best-effort:
+    a missing python-xlib or an unreachable display simply leaves the window
+    where it is.
     """
 
-    gdk_window = window.get_window()
-    get_xid = getattr(gdk_window, "get_xid", None)
-    if get_xid is None:
-        return False
     try:
-        from Xlib import Xatom, display as xdisplay, error as xerror
+        from Xlib import X, display as xdisplay, error as xerror, protocol
     except ImportError:
         return False
     try:
@@ -114,12 +108,14 @@ def _stick_to_all_desktops(window) -> bool:
     except (xerror.DisplayError, OSError):
         return False
     try:
-        target = connection.create_resource_object("window", get_xid())
-        target.change_property(
-            connection.intern_atom("_NET_WM_DESKTOP"),
-            Xatom.CARDINAL,
-            32,
-            [0xFFFFFFFF],
+        event = protocol.event.ClientMessage(
+            window=connection.create_resource_object("window", xid),
+            client_type=connection.intern_atom("_NET_WM_DESKTOP"),
+            data=(32, [value, 0, 0, 0, 0]),
+        )
+        connection.screen().root.send_event(
+            event,
+            event_mask=X.SubstructureRedirectMask | X.SubstructureNotifyMask,
         )
         connection.sync()
     finally:
@@ -127,55 +123,65 @@ def _stick_to_all_desktops(window) -> bool:
     return True
 
 
-def _bring_to_current_desktop(window) -> bool:
-    """Move an already-open X11 window to the desktop in use.
+def _x11_current_desktop() -> int | None:
+    """The active EWMH desktop, or None when it cannot be read."""
 
-    The sticky request above covers workspace switches, but a window manager
-    may ignore it; when the user asks for the window again this brings it
-    here instead of leaving it behind. Like `_stick_to_all_desktops` it
-    writes the EWMH property directly, because Cinnamon/Muffin ignores the
-    equivalent client message (and `GdkX11.move_to_current_desktop`): sticky
-    windows are left alone (moving one would drop the sticky state), and on
-    Wayland the compositor decides.
+    try:
+        from Xlib import Xatom, display as xdisplay, error as xerror
+    except ImportError:
+        return None
+    try:
+        connection = xdisplay.Display()
+    except (xerror.DisplayError, OSError):
+        return None
+    try:
+        prop = connection.screen().root.get_full_property(
+            connection.intern_atom("_NET_CURRENT_DESKTOP"), Xatom.CARDINAL
+        )
+        if prop is None or not prop.value:
+            return None
+        return int(prop.value[0])
+    finally:
+        connection.close()
+
+
+def _stick_to_all_desktops(window) -> bool:
+    """Show an X11 window on every virtual desktop.
+
+    GTK3 dropped the sticky API (GTK2's `gtk_window_stick`), so this asks the
+    window manager for EWMH "all desktops" (`_NET_WM_DESKTOP` 0xFFFFFFFF).
+    Wayland has no client API for it and python-xlib is an optional
+    dependency, so a missing library or a non-X11 window leaves the window
+    on the desktop where it was opened (there the compositor decides).
     """
 
     gdk_window = window.get_window()
     get_xid = getattr(gdk_window, "get_xid", None)
     if get_xid is None:
         return False
-    try:
-        from Xlib import Xatom, display as xdisplay, error as xerror
-    except ImportError:
+    return _x11_desktop_message(get_xid(), 0xFFFFFFFF)
+
+
+def _bring_to_current_desktop(window) -> bool:
+    """Move an already-open X11 window to the desktop in use and keep it sticky.
+
+    The sticky request covers workspace switches, but a window manager may
+    ignore it; when the user asks for the window again this moves it here and
+    re-asserts "all desktops" so it keeps following. On Wayland the
+    compositor decides.
+    """
+
+    gdk_window = window.get_window()
+    get_xid = getattr(gdk_window, "get_xid", None)
+    if get_xid is None:
         return False
-    try:
-        connection = xdisplay.Display()
-    except (xerror.DisplayError, OSError):
+    current = _x11_current_desktop()
+    if current is None:
         return False
-    try:
-        target = connection.create_resource_object("window", get_xid())
-        desktop = target.get_full_property(
-            connection.intern_atom("_NET_WM_DESKTOP"), Xatom.CARDINAL
-        )
-        if (
-            desktop is not None
-            and desktop.value
-            and desktop.value[0] == 0xFFFFFFFF
-        ):
-            return False
-        current = connection.screen().root.get_full_property(
-            connection.intern_atom("_NET_CURRENT_DESKTOP"), Xatom.CARDINAL
-        )
-        if current is None or not current.value:
-            return False
-        target.change_property(
-            connection.intern_atom("_NET_WM_DESKTOP"),
-            Xatom.CARDINAL,
-            32,
-            [int(current.value[0])],
-        )
-        connection.sync()
-    finally:
-        connection.close()
+    xid = get_xid()
+    if not _x11_desktop_message(xid, current):
+        return False
+    _x11_desktop_message(xid, 0xFFFFFFFF)
     return True
 
 
