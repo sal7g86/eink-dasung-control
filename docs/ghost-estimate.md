@@ -8,8 +8,9 @@ configured threshold the tray writes one line to its log — no desktop
 notification — and re-arms the alert after a soft/hard refresh or the `Reset
 estimate` button. The preview is deliberately ghost-only: the point is to
 compare where the estimator thinks the ghosts are with the physical panel.
-On X11 the window stays on every virtual desktop, so it follows the
-workspace in use; on Wayland that choice belongs to the compositor.
+On X11 the window remains on the workspace where it was opened; choosing it
+again from the tray menu moves it to the workspace in use (on Wayland that
+choice belongs to the compositor).
 
 The estimate is an **experimental** feature in 0.1: the model constants are
 assumptions to calibrate against the panel, and only a photo of the panel can

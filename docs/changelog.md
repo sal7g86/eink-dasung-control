@@ -14,11 +14,8 @@
 
 ### Fixed
 
-- `Controls…` and `Ghost estimate…` stay on every virtual desktop on X11, so
-  they follow the workspace in use instead of remaining on the one where they
-  were opened.
-- Requesting an already-open window from the menu brings it back to the
-  workspace in use when the window manager did not keep it everywhere.
+- `Controls…` and `Ghost estimate…` remain on the workspace where they were
+  opened; choosing one again from the menu moves it to the workspace in use.
 - `Controls…` and `Ghost estimate…` show their real title in the window list
   and task manager: installing the custom GTK titlebar was clearing it.
 - The clearing overlay is really click-through: the input-shape call failed

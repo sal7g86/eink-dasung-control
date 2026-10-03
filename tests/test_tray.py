@@ -37,12 +37,7 @@ from dasungctl.tray import (
     temperature_level_number,
 )
 from dasungctl.transport import TransportError
-from dasungctl.tray_windows import (
-    _bring_to_current_desktop,
-    _stick_on_map,
-    _stick_to_all_desktops,
-    _value_text,
-)
+from dasungctl.tray_windows import _bring_to_current_desktop, _value_text
 
 from fakes import RESPONSES, FakeTransport
 
@@ -921,67 +916,27 @@ def _fake_window(xid=0x1234):
     )
 
 
-def test_windows_are_stuck_to_every_desktop_through_the_ewmh_message(monkeypatch):
-    connection = _FakeXConnection()
-    _install_fake_xlib(monkeypatch, lambda: connection)
-
-    assert _stick_to_all_desktops(_fake_window()) is True
-
-    event, mask = connection.root.events[0]
-    assert event.client_type == 0xD00D  # _NET_WM_DESKTOP
-    assert event.window is connection.target
-    assert event.data == (32, [0xFFFFFFFF, 0, 0, 0, 0])
-    assert mask == 3  # redirect | notify
-    assert connection.xid == 0x1234
-    assert connection.synced is True
-    assert connection.closed is True
-
-
-def test_sticky_is_a_noop_without_python_xlib(monkeypatch):
-    monkeypatch.setitem(sys.modules, "Xlib", None)
-
-    assert _stick_to_all_desktops(_fake_window()) is False
-
-
-def test_sticky_ignores_a_window_without_an_xid():
-    wayland_like = types.SimpleNamespace(get_window=lambda: types.SimpleNamespace())
-    unmapped = types.SimpleNamespace(get_window=lambda: None)
-
-    assert _stick_to_all_desktops(wayland_like) is False
-    assert _stick_to_all_desktops(unmapped) is False
-
-
-def test_sticky_survives_an_unreachable_display(monkeypatch):
-    def explode():
-        raise _FakeDisplayError("no display")
-
-    _install_fake_xlib(monkeypatch, explode)
-
-    assert _stick_to_all_desktops(_fake_window()) is False
-
-
-def test_map_handler_sticks_and_keeps_the_gtk_event_flow(monkeypatch):
-    from dasungctl import tray_windows
-
-    seen = []
-    monkeypatch.setattr(tray_windows, "_stick_to_all_desktops", seen.append)
-
-    assert _stick_on_map("window", None) is False
-    assert seen == ["window"]
-
-
-def test_requested_window_moves_to_the_current_desktop_then_sticks(monkeypatch):
+def test_requested_window_moves_to_the_current_desktop(monkeypatch):
     connection = _FakeXConnection()
     connection.root.current_desktop = 2
     _install_fake_xlib(monkeypatch, lambda: connection)
 
     assert _bring_to_current_desktop(_fake_window()) is True
 
-    first, second = connection.root.events
-    assert first[0].data == (32, [2, 0, 0, 0, 0])
-    assert second[0].data == (32, [0xFFFFFFFF, 0, 0, 0, 0])
-    assert first[0].client_type == second[0].client_type == 0xD00D
+    (event, mask), = connection.root.events
+    assert event.client_type == 0xD00D  # _NET_WM_DESKTOP
+    assert event.data == (32, [2, 0, 0, 0, 0])
+    assert mask == 3  # redirect | notify
     assert connection.closed is True
+
+
+def test_bring_to_current_survives_an_unreachable_display(monkeypatch):
+    def explode():
+        raise _FakeDisplayError("no display")
+
+    _install_fake_xlib(monkeypatch, explode)
+
+    assert _bring_to_current_desktop(_fake_window()) is False
 
 
 def test_bring_to_current_needs_a_current_desktop(monkeypatch):

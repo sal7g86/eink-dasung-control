@@ -93,10 +93,10 @@ def _x11_desktop_message(xid, value) -> bool:
 
     Cinnamon/Muffin acts on the client message but ignores the equivalent
     property change (a property written by the client is only echoed back by
-    `wmctrl`, so it looks set while nothing moves), which is why both the
-    sticky request and the move-to-current one go through here. Best-effort:
-    a missing python-xlib or an unreachable display simply leaves the window
-    where it is.
+    `wmctrl`, so it looks set while nothing moves), which is why the
+    move-to-current request goes through here. Best-effort: a missing
+    python-xlib or an unreachable display simply leaves the window where it
+    is.
     """
 
     try:
@@ -145,29 +145,12 @@ def _x11_current_desktop() -> int | None:
         connection.close()
 
 
-def _stick_to_all_desktops(window) -> bool:
-    """Show an X11 window on every virtual desktop.
-
-    GTK3 dropped the sticky API (GTK2's `gtk_window_stick`), so this asks the
-    window manager for EWMH "all desktops" (`_NET_WM_DESKTOP` 0xFFFFFFFF).
-    Wayland has no client API for it and python-xlib is an optional
-    dependency, so a missing library or a non-X11 window leaves the window
-    on the desktop where it was opened (there the compositor decides).
-    """
-
-    gdk_window = window.get_window()
-    get_xid = getattr(gdk_window, "get_xid", None)
-    if get_xid is None:
-        return False
-    return _x11_desktop_message(get_xid(), 0xFFFFFFFF)
-
-
 def _bring_to_current_desktop(window) -> bool:
-    """Move an already-open X11 window to the desktop in use and keep it sticky.
+    """Move an already-open X11 window to the desktop in use.
 
-    The sticky request covers workspace switches, but a window manager may
-    ignore it; when the user asks for the window again this moves it here and
-    re-asserts "all desktops" so it keeps following. On Wayland the
+    Windows stay on the workspace where they were opened: only choosing one
+    again from the tray menu moves it here. Cinnamon/Muffin acts on the EWMH
+    client message but ignores the equivalent property change; on Wayland the
     compositor decides.
     """
 
@@ -178,18 +161,7 @@ def _bring_to_current_desktop(window) -> bool:
     current = _x11_current_desktop()
     if current is None:
         return False
-    xid = get_xid()
-    if not _x11_desktop_message(xid, current):
-        return False
-    _x11_desktop_message(xid, 0xFFFFFFFF)
-    return True
-
-
-def _stick_on_map(window, _event) -> bool:
-    """`map-event` handler: keep the window on every virtual desktop (X11)."""
-
-    _stick_to_all_desktops(window)
-    return False
+    return _x11_desktop_message(get_xid(), current)
 
 
 class ControlsWindow:
@@ -217,7 +189,6 @@ class ControlsWindow:
         window = Gtk.Window(title="DASUNG monitor control")
         window.set_default_size(430, 620)
         window.connect("delete-event", self._on_delete)
-        window.connect("map-event", _stick_on_map)
         self.window = window
 
         header = Gtk.HeaderBar()
@@ -721,7 +692,6 @@ class GhostWindow:
         window = Gtk.Window(title="DASUNG ghost estimate")
         window.set_default_size(380, 760)
         window.connect("delete-event", self._on_delete)
-        window.connect("map-event", _stick_on_map)
         self.window = window
 
         header = Gtk.HeaderBar()
