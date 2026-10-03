@@ -391,8 +391,7 @@ On 2026-09-25 the hard-refresh option `01` was sent once on the target as an
 approved targeted test: the monitor acknowledged the frame
 (`5FF50301000000000000A0FA`) and the user reported a clean screen with no
 ghosting. It did not measurably outperform the soft refresh for the light
-ghost used in that test; details and photos are summarized in
-[`archive/ghosting-experiments.md`](archive/ghosting-experiments.md).
+ghost used in that test.
 
 ## Official-client static evidence
 

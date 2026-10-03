@@ -11,8 +11,7 @@ compare where the estimator thinks the ghosts are with the physical panel.
 
 The estimate is an **experimental** feature in 0.1: the model constants are
 assumptions to calibrate against the panel, and only a photo of the panel can
-confirm a real ghost (the measurement approach is described in
-[archive/ghosting-experiments.md](archive/ghosting-experiments.md)).
+confirm a real ghost.
 
 ## How it works
 
@@ -160,5 +159,5 @@ These are the non-obvious points future changes must keep in mind.
   samples.
 
 The physical measurements that led here — refresh efficacy, the removed grid
-and adaptive clearing modes, the rejected low-amplitude maintenance — are
-summarized in [archive/ghosting-experiments.md](archive/ghosting-experiments.md).
+and adaptive clearing modes, the rejected low-amplitude maintenance — were
+taken during development.

@@ -43,8 +43,8 @@ windows from `tray_windows`) against `tests.fakes.FakeTransport` and enter
 `docs/protocol.md` holds the confirmed wire format, the exact captures and
 the open questions; keep it in sync when changing `protocol.py` or
 `client.py`. The distilled static analysis of the official clients is in
-`docs/research-findings.md`, and the physical ghosting measurements are in
-`docs/archive/ghosting-experiments.md`. Review the exact frame and its
+`docs/research-findings.md`, and the physical ghosting measurements were
+taken during development. Review the exact frame and its
 evidence before sending state-changing frames to the hardware; only one
 process can hold the monitor at a time (lock in `$XDG_STATE_HOME/dasungctl/`).
 
