@@ -25,7 +25,7 @@ and has been tested on Linux Mint.
 | :---: | :---: | :---: |
 | The tray menu with the values read from the monitor | `Controls…` — mode, contrast, speed, frontlight and auto-refresh | `Ghost estimate…` on a real ghost, with the automatic clearing settings |
 
-*The animation shows the tray flow; click a screenshot for the full-resolution version.*
+*The animation shows the tray flow; click a screenshot for the full-resolution version. The animation and screenshots above refer to version 0.1.*
 
 ## What it does
 
