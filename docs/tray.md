@@ -44,6 +44,8 @@ mixed). The panel tooltip shows the full state and, on panels that render
 indicator labels (such as KDE), the label shows the current mode.
 `Ghost estimate…` opens the experimental ghost estimate
 (see [ghost-estimate.md](ghost-estimate.md)).
+Both windows stay on every virtual desktop on X11, so they follow the
+workspace in use.
 
 Started from a terminal, the tray mirrors its log lines on stderr and Ctrl+C
 exits cleanly like the `Quit` menu entry; SIGTERM (for example at session

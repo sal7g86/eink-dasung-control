@@ -88,6 +88,52 @@ def install_window_css(Gtk, Gdk) -> None:
     )
 
 
+def _stick_to_all_desktops(window) -> bool:
+    """Show an X11 window on every virtual desktop.
+
+    GTK3 dropped the sticky API (GTK2's `gtk_window_stick`), so this sets the
+    EWMH `_NET_WM_DESKTOP` property to 0xFFFFFFFF ("all desktops"), the value
+    the window manager reads: Cinnamon/Muffin ignores the equivalent
+    `_NET_WM_DESKTOP` client message but honours this property change. It is
+    best-effort by design: Wayland has no client API for it, python-xlib is
+    an optional dependency, and a missing library, a non-X11 window or an
+    unreachable display simply leave the window on the desktop where it was
+    opened.
+    """
+
+    gdk_window = window.get_window()
+    get_xid = getattr(gdk_window, "get_xid", None)
+    if get_xid is None:
+        return False
+    try:
+        from Xlib import Xatom, display as xdisplay, error as xerror
+    except ImportError:
+        return False
+    try:
+        connection = xdisplay.Display()
+    except (xerror.DisplayError, OSError):
+        return False
+    try:
+        target = connection.create_resource_object("window", get_xid())
+        target.change_property(
+            connection.intern_atom("_NET_WM_DESKTOP"),
+            Xatom.CARDINAL,
+            32,
+            [0xFFFFFFFF],
+        )
+        connection.sync()
+    finally:
+        connection.close()
+    return True
+
+
+def _stick_on_map(window, _event) -> bool:
+    """`map-event` handler: keep the window on every virtual desktop (X11)."""
+
+    _stick_to_all_desktops(window)
+    return False
+
+
 class ControlsWindow:
     """GTK window with the monitor's adjustable fields."""
 
@@ -113,6 +159,7 @@ class ControlsWindow:
         window = Gtk.Window(title="DASUNG monitor control")
         window.set_default_size(430, 620)
         window.connect("delete-event", self._on_delete)
+        window.connect("map-event", _stick_on_map)
         self.window = window
 
         header = Gtk.HeaderBar()
@@ -610,6 +657,7 @@ class GhostWindow:
         window = Gtk.Window(title="DASUNG ghost estimate")
         window.set_default_size(380, 760)
         window.connect("delete-event", self._on_delete)
+        window.connect("map-event", _stick_on_map)
         self.window = window
 
         header = Gtk.HeaderBar()

@@ -12,6 +12,12 @@
   `pyproject.toml` maps the `dasungctl` import name onto the directory and
   `src/_source_run.py` runs the program from a checkout without installing.
 
+### Fixed
+
+- `Controls…` and `Ghost estimate…` stay on every virtual desktop on X11, so
+  they follow the workspace in use instead of remaining on the one where they
+  were opened.
+
 ## 0.1.1 — 2026-10-03
 
 The README animation and screenshots were recorded on version 0.1 and do not

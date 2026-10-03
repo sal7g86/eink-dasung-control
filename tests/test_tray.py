@@ -2,6 +2,7 @@
 
 from contextlib import nullcontext
 import signal
+import sys
 import threading
 import time
 import types
@@ -36,7 +37,11 @@ from dasungctl.tray import (
     temperature_level_number,
 )
 from dasungctl.transport import TransportError
-from dasungctl.tray_windows import _value_text
+from dasungctl.tray_windows import (
+    _stick_on_map,
+    _stick_to_all_desktops,
+    _value_text,
+)
 
 from fakes import RESPONSES, FakeTransport
 
@@ -839,6 +844,108 @@ def test_value_text_labels_each_slider_with_its_own_scale():
     assert _value_text("speed", 4) == "Fast+++"
     assert _value_text("contrast", 5) == "5"
     assert _value_text("temperature", 4) == "4"
+
+
+class _FakeDisplayError(Exception):
+    """Stand-in for `Xlib.error.DisplayError` in the tests."""
+
+
+class _FakeXWindow:
+    def __init__(self):
+        self.properties = []
+
+    def change_property(self, atom, type_atom, format, data):
+        self.properties.append((atom, type_atom, format, data))
+
+
+class _FakeXConnection:
+    """python-xlib stand-in recording the sticky property change."""
+
+    def __init__(self):
+        self.target = _FakeXWindow()
+        self.xid = None
+        self.synced = False
+        self.closed = False
+
+    def intern_atom(self, name):
+        assert name == "_NET_WM_DESKTOP"
+        return 0xD00D
+
+    def create_resource_object(self, kind, xid):
+        assert kind == "window"
+        self.xid = xid
+        return self.target
+
+    def sync(self):
+        self.synced = True
+
+    def close(self):
+        self.closed = True
+
+
+def _install_fake_xlib(monkeypatch, display_factory):
+    """Install a python-xlib stand-in whose Display() runs `display_factory`."""
+
+    fake = types.ModuleType("Xlib")
+    fake.Xatom = types.SimpleNamespace(CARDINAL=0xC0DE)
+    fake.display = types.SimpleNamespace(Display=display_factory)
+    fake.error = types.SimpleNamespace(DisplayError=_FakeDisplayError)
+    monkeypatch.setitem(sys.modules, "Xlib", fake)
+
+
+def _fake_window(xid=0x1234):
+    return types.SimpleNamespace(
+        get_window=lambda: types.SimpleNamespace(get_xid=lambda: xid)
+    )
+
+
+def test_windows_are_stuck_to_every_desktop_through_the_ewmh_property(monkeypatch):
+    connection = _FakeXConnection()
+    _install_fake_xlib(monkeypatch, lambda: connection)
+
+    assert _stick_to_all_desktops(_fake_window()) is True
+
+    (atom, type_atom, format, data), = connection.target.properties
+    assert atom == 0xD00D  # _NET_WM_DESKTOP
+    assert type_atom == 0xC0DE  # CARDINAL
+    assert format == 32
+    assert data == [0xFFFFFFFF]
+    assert connection.xid == 0x1234
+    assert connection.synced is True
+    assert connection.closed is True
+
+
+def test_sticky_is_a_noop_without_python_xlib(monkeypatch):
+    monkeypatch.setitem(sys.modules, "Xlib", None)
+
+    assert _stick_to_all_desktops(_fake_window()) is False
+
+
+def test_sticky_ignores_a_window_without_an_xid():
+    wayland_like = types.SimpleNamespace(get_window=lambda: types.SimpleNamespace())
+    unmapped = types.SimpleNamespace(get_window=lambda: None)
+
+    assert _stick_to_all_desktops(wayland_like) is False
+    assert _stick_to_all_desktops(unmapped) is False
+
+
+def test_sticky_survives_an_unreachable_display(monkeypatch):
+    def explode():
+        raise _FakeDisplayError("no display")
+
+    _install_fake_xlib(monkeypatch, explode)
+
+    assert _stick_to_all_desktops(_fake_window()) is False
+
+
+def test_map_handler_sticks_and_keeps_the_gtk_event_flow(monkeypatch):
+    from dasungctl import tray_windows
+
+    seen = []
+    monkeypatch.setattr(tray_windows, "_stick_to_all_desktops", seen.append)
+
+    assert _stick_on_map("window", None) is False
+    assert seen == ["window"]
 
 
 def test_temperature_levels_span_cold_to_warm_with_ten_radio_labels():
