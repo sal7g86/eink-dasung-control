@@ -100,8 +100,10 @@ def test_auto_detection_reports_missing_ch340(monkeypatch):
         lambda: [("/dev/ttyACM0", 0x1234, 0x5678, "Other device")],
     )
 
-    with pytest.raises(transport.TransportError, match="1a86:7523.*ttyACM0"):
+    with pytest.raises(transport.TransportError, match="1a86:7523.*ttyACM0") as exc:
         transport.SerialTransport().open()
+
+    assert exc.value.reason == transport.REASON_NOT_FOUND
 
 
 def test_auto_detection_refuses_ambiguous_ch340_devices(monkeypatch):
@@ -114,8 +116,25 @@ def test_auto_detection_refuses_ambiguous_ch340_devices(monkeypatch):
         ],
     )
 
-    with pytest.raises(transport.TransportError, match="multiple CH340.*--device"):
+    with pytest.raises(transport.TransportError, match="multiple CH340.*--device") as exc:
         transport.SerialTransport().open()
+
+    assert exc.value.reason == transport.REASON_MULTIPLE
+
+
+def test_open_failure_carries_the_device_and_its_reason(monkeypatch):
+    def refuse(**_settings):
+        raise transport.serial.SerialException(
+            "[Errno 13] Permission denied: '/dev/ttyUSB0'"
+        )
+
+    monkeypatch.setattr(transport.serial, "Serial", refuse)
+
+    with pytest.raises(transport.TransportError) as exc:
+        transport.SerialTransport("/dev/ttyUSB0").open()
+
+    assert exc.value.reason == transport.REASON_NO_PERMISSION
+    assert exc.value.device == "/dev/ttyUSB0"
 
 
 def test_auto_detection_is_cached_between_opens(monkeypatch):
@@ -170,8 +189,10 @@ def test_serial_transport_rejects_incomplete_response(monkeypatch):
     )
 
     with transport.SerialTransport("/dev/fake") as serial_transport:
-        with pytest.raises(transport.TransportError, match="incomplete response"):
+        with pytest.raises(transport.TransportError, match="incomplete response") as exc:
             serial_transport.exchange(REQUEST)
+
+    assert exc.value.reason == transport.REASON_NO_RESPONSE
 
 
 def test_send_does_not_wait_for_a_response(monkeypatch):

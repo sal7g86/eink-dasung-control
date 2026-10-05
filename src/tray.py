@@ -37,6 +37,14 @@ from .config import (
     ghost_settings,
     load_config,
 )
+from .errors import (
+    KIND_CONNECTION,
+    SEVERITY_ERROR,
+    SEVERITY_WARN,
+    SEVERITY_WORKING,
+    error_kind,
+    short_error,
+)
 from .ghostwatch import GhostWatcher
 from .locking import serial_lock
 from .panels import DEFAULT_PANEL, get_panel
@@ -46,7 +54,7 @@ from .protocol import (
     ProtocolError,
     display_mode_name,
 )
-from .screencap import open_capture
+from .screencap import monitor_output_present, open_capture
 from .state import StateError, apply_fields, load_last, save_last
 from .transport import SerialTransport, TransportError
 from .windows import open_zones
@@ -145,6 +153,10 @@ READ_FIELDS = DEFAULT_PANEL.read_fields
 # physical buttons: the display fields are read back this often, and a
 # confirmed difference updates the UI and the saved last configuration.
 POLL_SECONDS = 5.0
+# Failed exchanges in a row before the monitor is declared unavailable: one
+# stall can happen while the panel processes a refresh, and it must not stop
+# the automatic features or erase the saved preferences.
+MONITOR_FAILURES = 2
 
 SCALE_STEPS = {
     "contrast": 1,
@@ -204,14 +216,18 @@ def icon_name(Gtk, candidates) -> str | None:
     return _ICON_CACHE[candidates]
 
 
-def status_symbol(message: str) -> tuple[tuple[str, ...], str]:
-    """Icon chain and CSS class for a non-empty status message."""
+def status_symbol(message: str, severity: str = "") -> tuple[tuple[str, ...], str]:
+    """Icon chain and CSS class for a non-empty status message.
 
-    if message.startswith("error") or " failed" in message:
+    The severity is structured (`errors.SEVERITY_*`), never parsed from the
+    message text.
+    """
+
+    if severity == SEVERITY_ERROR:
         return ICON_ERROR, "dasung-error"
-    if "ignored" in message or "not saved" in message:
+    if severity == SEVERITY_WARN:
         return ICON_WARNING, ""
-    if message.startswith("working"):
+    if severity == SEVERITY_WORKING:
         return ICON_WORKING, ""
     return ICON_OK, "dasung-ok"
 
@@ -293,6 +309,12 @@ class TrayState:
 
     info: MonitorInfo
     message: str = ""
+    # Structured feedback for the UI: `severity` drives the status icon and
+    # colour (errors.SEVERITY_*), `error_detail` the Controls window tooltip
+    # and `error_kind` whether a failure means the monitor is unreachable.
+    severity: str = ""
+    error_detail: str = ""
+    error_kind: str | None = None
     custom_temperature: int | None = None
     autorefresh: bool = False
     interval: float = 300.0
@@ -368,6 +390,24 @@ class TrayController:
         self._opener = opener or self._open_transport
         self._locker = locker or serial_lock
         self._clock = clock
+        # Monitor reachability, split by signal: `serial_available` comes
+        # from the serial exchanges, `display_present` from the e-ink output
+        # probe (X11) and `monitor_available` is their combination. The CH340
+        # stays powered when the panel is switched off and its selectors keep
+        # answering, so only the output tells "off" from "on".
+        self.monitor_available: bool | None = None
+        self.serial_available: bool | None = None
+        self.display_present: bool | None = None
+        self._failures = 0
+        self._display_misses = 0
+        # True once restore() has loaded the saved preferences: the startup
+        # output probe can confirm the panel is off before that, and there is
+        # nothing meaningful to persist until the saved values are in.
+        self.prefs_loaded = False
+        # True while the saved configuration has not been applied yet (the
+        # panel was off at startup, or the session failed): the tray retries
+        # it when the monitor becomes reachable.
+        self.restore_pending = False
         # External-change polling starts counting at construction, so the
         # first poll happens one POLL_SECONDS after the tray starts.
         self._last_poll = self._clock()
@@ -386,8 +426,173 @@ class TrayController:
             with self._opener() as transport:
                 yield DasungClient(transport)
 
+    def _set_status(self, message: str, severity: str = "", detail: str = "") -> None:
+        """Publish a status line and clear the previous error context."""
+
+        self.state.message = message
+        self.state.severity = severity
+        self.state.error_detail = detail
+        self.state.error_kind = None
+
+    def _set_error(
+        self, message: str, detail: str = "", kind: str = KIND_CONNECTION
+    ) -> None:
+        """Publish a failure; `detail` feeds the window tooltip and the log."""
+
+        self.state.message = message
+        self.state.severity = SEVERITY_ERROR
+        self.state.error_detail = detail
+        self.state.error_kind = kind
+
+    def _strike(self) -> bool:
+        """Count one connection failure; True when the monitor is confirmed lost.
+
+        One failed exchange can be a transient stall (the firmware ignores
+        reads right after a command), so the monitor is declared unavailable
+        only after `MONITOR_FAILURES` failures in a row; a success resets the
+        counter.
+        """
+
+        self._failures += 1
+        if self._failures < MONITOR_FAILURES:
+            return False
+        self.serial_available = False
+        self.monitor_available = False
+        self._stop_automatic()
+        if self._failures == MONITOR_FAILURES and self.display_present is True:
+            self.log.warn(
+                "serial silent while the display output is present: if it "
+                "stays mute, replug the monitor's USB cable"
+            )
+        return True
+
+    def _succeed(self) -> None:
+        """Reset the failure count and announce a recovery once."""
+
+        was = self.monitor_available
+        self._failures = 0
+        self.serial_available = True
+        if self.display_present is False:
+            # The serial interface works but the panel is off: it stays
+            # unavailable until the display output comes back.
+            self.monitor_available = False
+            return
+        self.monitor_available = True
+        if was is False and self.state.severity == SEVERITY_ERROR:
+            self._set_status("monitor connected")
+            self.log.info(self.state.message)
+
+    def set_display_present(self, present: bool | None) -> None:
+        """Feed the e-ink output probe into the availability state.
+
+        `False` means the output is missing (the panel's HDMI receiver is
+        off), `True` that it is there, `None` that the probe cannot tell
+        (Wayland, no display, no way to identify the output): `None` leaves
+        the serial-only behaviour. The first verdict is conclusive; after the
+        output was seen, two misses in a row confirm the panel is off, so a
+        display reconfiguration does not switch the automatic features off.
+        """
+
+        if present is None:
+            return
+        if present:
+            self._display_misses = 0
+            was_off = self.display_present is False
+            self.display_present = True
+            if was_off and self.serial_available is True:
+                self.monitor_available = True
+                if self.state.severity == SEVERITY_ERROR:
+                    self._set_status("monitor connected")
+                    self.log.info(self.state.message)
+            return
+        self._display_misses += 1
+        # The first verdict is conclusive: the output was never seen, so a
+        # tray started with the panel off must not wait (and must not write
+        # to the serial). Later misses need confirmation, so a display
+        # reconfiguration does not switch the automatic features off.
+        if (
+            self.display_present is not None
+            and self._display_misses < MONITOR_FAILURES
+        ):
+            return
+        if self.display_present is False:
+            # A later success message may have replaced the reason.
+            if (
+                self.serial_available is not False
+                and self.state.severity != SEVERITY_ERROR
+            ):
+                self._set_error("monitor off (no display output)")
+            return
+        self.display_present = False
+        self.monitor_available = False
+        if self.serial_available is False:
+            # The serial side already reported the monitor missing.
+            return
+        self._stop_automatic()
+        self._set_error("monitor off (no display output)")
+        self.log.warn("monitor off: no display output")
+
+    def _panel_off(self) -> bool:
+        """True when the e-ink output is known to be missing (panel off).
+
+        The serial interface stays powered in that state, but a command sent
+        to a switched-off panel can wedge the monitor's firmware (observed
+        2026-10-04): while the output is missing the tray never opens the
+        serial port.
+        """
+
+        return self.display_present is False
+
+    def _stop_automatic(self) -> None:
+        """Switch the automatic features off when the monitor is gone.
+
+        The choice is persisted like any manual switch, so the features stay
+        off when the monitor comes back. Before restore() has loaded the
+        saved preferences there is nothing to persist: the availability gate
+        already keeps the features from running, and restore() stops them
+        once it has the saved values.
+        """
+
+        if not self.prefs_loaded:
+            return
+        if self.state.autorefresh:
+            self.log.warn("auto-refresh off: monitor unavailable")
+            self.set_autorefresh(False, announce=False)
+        if self.state.ghost_estimate:
+            self.log.warn("ghost estimate off: monitor unavailable")
+            self.set_ghost_estimate(False, announce=False)
+
     def _fail(self, exc: Exception) -> None:
-        self.state.message = f"error: {exc}"
+        """Publish a failed operation and count connection failures."""
+
+        kind = error_kind(exc)
+        if kind == KIND_CONNECTION:
+            self._strike()
+        self._set_error(short_error(exc), str(exc), kind)
+
+    def _blank_read(self, info: MonitorInfo) -> bool:
+        """True when a lenient read obtained no field at all.
+
+        The tray reads leniently, so a missing monitor does not raise: every
+        selector simply fails and the answer is all None. Losing every field
+        that way is a missing monitor, not a successful reload.
+        """
+
+        return all(
+            getattr(info, name) is None for name in self.panel.read_fields
+        )
+
+    def _saved_info(self, saved) -> MonitorInfo:
+        """The saved monitor fields as a MonitorInfo (mode already resolved)."""
+
+        return replace(
+            EMPTY_INFO,
+            **{
+                name: saved[name]
+                for name in self.panel.read_fields
+                if name in saved
+            },
+        )
 
     def _normalize(self, info: MonitorInfo) -> MonitorInfo:
         """Map a mixed read-back to the project's custom mode.
@@ -422,6 +627,10 @@ class TrayController:
     def read(self) -> bool:
         """Reload the display fields from the monitor (no writes)."""
 
+        if self._panel_off():
+            self.log.warn("reload skipped: monitor off (no display output)")
+            self._set_error("monitor off (no display output)")
+            return False
         try:
             with self._session() as client:
                 info = client.read_info(
@@ -431,8 +640,14 @@ class TrayController:
             self.log.error(f"reload failed: {exc}")
             self._fail(exc)
             return False
+        if self._blank_read(info):
+            self.log.error("reload failed: no selector answered")
+            self._strike()
+            self._set_error("monitor not responding", "no selector answered")
+            return False
+        self._succeed()
         self._remember(self._normalize(info))
-        self.state.message = "reloaded"
+        self._set_status("reloaded")
         self.log.info("reloaded from the monitor")
         return True
 
@@ -442,18 +657,31 @@ class TrayController:
         The display fields are read leniently: a selector that does not answer
         (the monitor stalls right after a write) keeps its previous value, so
         only confirmed differences update the UI and the saved configuration.
-        Failures stay silent: this runs on a timer, and an unreachable monitor
-        must not overwrite the status line every few seconds.
+        The poll is also the availability probe: one failed read stays silent,
+        while the second in a row declares the monitor missing (the status
+        line says so and the automatic features are switched off). A panel
+        known to be off is never polled at all.
         """
 
         self._last_poll = self._clock()
+        if self._panel_off():
+            return False
         try:
             with self._session() as client:
                 info = client.read_info(
                     lenient=True, fields=self.panel.read_fields
                 )
-        except TRAY_ERRORS:
+        except TRAY_ERRORS as exc:
+            if self._strike():
+                self._set_error(short_error(exc), str(exc))
             return False
+        if self._blank_read(info):
+            if self._strike():
+                self._set_error(
+                    "monitor not responding", "no selector answered"
+                )
+            return False
+        self._succeed()
         info = self._normalize(info)
         changed = {
             name: getattr(info, name)
@@ -464,9 +692,12 @@ class TrayController:
         if not changed:
             return False
         self._remember(replace(self.state.info, **changed))
-        self.state.message = "monitor changed: " + ", ".join(
-            _change_text(name, value, self.panel)
-            for name, value in changed.items()
+        self._set_status(
+            "monitor changed: "
+            + ", ".join(
+                _change_text(name, value, self.panel)
+                for name, value in changed.items()
+            )
         )
         self.log.info(self.state.message)
         self._store_last()
@@ -481,10 +712,44 @@ class TrayController:
 
         saved = None
         note = ""
+        detail = ""
         try:
             saved = load_last(panel=self.panel)
         except StateError as exc:
-            note = f"last configuration ignored: {exc}"
+            note = "saved settings ignored (invalid file)"
+            detail = str(exc)
+        restored = saved or {}
+        # The preferences are loaded before the serial session: when the
+        # monitor is missing the session fails, and switching the automatic
+        # features off must persist them without losing the saved values.
+        if "autorefresh" in restored:
+            self.state.autorefresh = restored["autorefresh"]
+            if self.state.autorefresh:
+                # Count the first interval from startup, not from tray start.
+                self.state.last_refresh = self._clock()
+        if "autorefresh_interval" in restored:
+            self.state.interval = restored["autorefresh_interval"]
+        if "ghost_clear" in restored:
+            merged = dict(self.state.ghost_clear_settings)
+            merged.update(restored["ghost_clear"])
+            merged["enabled"] = bool(merged["enabled"])
+            self.state.ghost_clear_settings = merged
+            self.state.ghost_clear = merged["enabled"]
+        if "ghost_estimate" in restored:
+            self.state.ghost_estimate = restored["ghost_estimate"]
+        self.prefs_loaded = True
+        if self._panel_off():
+            # The serial is never opened with the panel off: the saved
+            # configuration is applied again when the output comes back.
+            if saved:
+                self.state.info = self._saved_info(saved)
+            if note:
+                self.log.warn(f"last configuration ignored: {detail}")
+            self._stop_automatic()
+            self.log.warn("restore skipped: monitor off (no display output)")
+            self._set_error("monitor off (no display output)")
+            self.restore_pending = True
+            return False
         try:
             with self._session() as client:
                 if saved:
@@ -503,40 +768,36 @@ class TrayController:
                     lenient=True, fields=self.panel.read_fields
                 )
         except TRAY_ERRORS as exc:
+            if saved:
+                # Keep the saved settings in the state even though the session
+                # failed: switching the automatic features off rewrites the
+                # file, and it must not lose the monitor fields with it.
+                self.state.info = self._saved_info(saved)
             self.log.error(f"restore failed: {exc}")
             self._fail(exc)
+            self.restore_pending = True
             return False
+        self._succeed()
         self._remember(self._normalize(info))
-        restored = saved or {}
-        if "autorefresh" in restored:
-            self.state.autorefresh = restored["autorefresh"]
-            if self.state.autorefresh:
-                # Count the first interval from startup, not from tray start.
-                self.state.last_refresh = self._clock()
-        if "autorefresh_interval" in restored:
-            self.state.interval = restored["autorefresh_interval"]
-        if "ghost_clear" in restored:
-            merged = dict(self.state.ghost_clear_settings)
-            merged.update(restored["ghost_clear"])
-            merged["enabled"] = bool(merged["enabled"])
-            self.state.ghost_clear_settings = merged
-            self.state.ghost_clear = merged["enabled"]
-        if "ghost_estimate" in restored:
-            self.state.ghost_estimate = restored["ghost_estimate"]
+        self.restore_pending = False
         if note:
-            self.state.message = note
-            self.log.warn(note)
+            self._set_status(note, SEVERITY_WARN, detail)
+            self.log.warn(f"last configuration ignored: {detail}")
         elif saved:
-            self.state.message = "last configuration restored"
+            self._set_status("last configuration restored")
             self.log.info(self.state.message)
         else:
-            self.state.message = "reloaded"
+            self._set_status("reloaded")
             self.log.info("reloaded from the monitor")
         return True
 
     def apply(self, name: str, value: int) -> bool:
         """Apply one field through the shared control logic and persist it."""
 
+        if self._panel_off():
+            self.log.warn("apply skipped: monitor off (no display output)")
+            self._set_error("monitor off (no display output)")
+            return False
         try:
             with self._session() as client:
                 applied = controls.apply_field(
@@ -548,9 +809,15 @@ class TrayController:
             )
             self._fail(exc)
             return False
-        if applied:
-            self.log.info(f"applied {_change_text(name, value, self.panel)}")
-            self._store_last()
+        if not applied:
+            # controls already published the short message and its detail; a
+            # connection failure also counts toward the availability check.
+            if self.state.error_kind == KIND_CONNECTION:
+                self._strike()
+            return False
+        self._succeed()
+        self.log.info(f"applied {_change_text(name, value, self.panel)}")
+        self._store_last()
         return applied
 
     def _store_last(self) -> None:
@@ -585,7 +852,10 @@ class TrayController:
                 panel=self.panel,
             )
         except OSError as exc:
-            self.state.message += f" (not saved: {exc})"
+            self.state.message += " (not saved)"
+            if self.state.severity != SEVERITY_ERROR:
+                self.state.severity = SEVERITY_WARN
+            self.state.error_detail = str(exc)
             self.log.error(f"cannot save the last configuration: {exc}")
             return
         self._stored_key = key
@@ -593,6 +863,10 @@ class TrayController:
     def refresh(self, hard: bool = False) -> bool:
         """Send a global soft or hard refresh and timestamp it."""
 
+        if self._panel_off():
+            self.log.warn("refresh skipped: monitor off (no display output)")
+            self._set_error("monitor off (no display output)")
+            return False
         try:
             with self._session() as client:
                 client.refresh(hard=hard, wait=True)
@@ -600,25 +874,35 @@ class TrayController:
             self.log.error(f"refresh failed: {exc}")
             self._fail(exc)
             return False
+        self._succeed()
         self.state.last_refresh = self._clock()
-        self.state.message = "hard refresh sent" if hard else "soft refresh sent"
+        self._set_status("hard refresh sent" if hard else "soft refresh sent")
         self.log.info(self.state.message)
         return True
 
-    def set_autorefresh(self, enabled: bool) -> None:
-        """Turn the periodic refresh on or off (timing restarts from now)."""
+    def set_autorefresh(self, enabled: bool, *, announce: bool = True) -> bool:
+        """Turn the periodic refresh on or off (timing restarts from now).
 
+        The switch is refused while the monitor is missing: the timer would
+        have nothing to refresh. Returns whether the choice was applied.
+        """
+
+        if enabled and self.monitor_available is not True:
+            self.log.warn("auto-refresh not started: monitor unavailable")
+            return False
         self.state.autorefresh = bool(enabled)
         self.state.last_refresh = self._clock()
-        self.state.message = "auto-refresh on" if enabled else "auto-refresh off"
-        self.log.info(self.state.message)
+        if announce:
+            self._set_status("auto-refresh on" if enabled else "auto-refresh off")
+        self.log.info("auto-refresh on" if enabled else "auto-refresh off")
         self._store_last()
+        return True
 
     def set_interval(self, seconds: float) -> None:
         """Set the auto-refresh period in seconds."""
 
         self.state.interval = float(seconds)
-        self.state.message = f"auto-refresh interval: {interval_label(seconds)}"
+        self._set_status(f"auto-refresh interval: {interval_label(seconds)}")
         self.log.info(self.state.message)
         self._store_last()
 
@@ -627,7 +911,7 @@ class TrayController:
 
         self.state.ghost_clear = bool(enabled)
         self.state.ghost_clear_settings["enabled"] = bool(enabled)
-        self.state.message = (
+        self._set_status(
             "ghost auto-clear on" if enabled else "ghost auto-clear off"
         )
         self.log.info(self.state.message)
@@ -640,24 +924,39 @@ class TrayController:
         merged.update(values)
         merged["enabled"] = self.state.ghost_clear
         self.state.ghost_clear_settings = merged
-        self.state.message = "ghost clearing settings updated"
+        self._set_status("ghost clearing settings updated")
         self.log.info(self.state.message)
         self._store_last()
 
-    def set_ghost_estimate(self, running: bool) -> None:
-        """Stop or restart the ghost estimate and persist the choice."""
+    def set_ghost_estimate(self, running: bool, *, announce: bool = True) -> bool:
+        """Stop or restart the ghost estimate and persist the choice.
 
+        Refused while the monitor is missing: sampling would be suspended
+        anyway. Returns whether the choice was applied.
+        """
+
+        if running and self.monitor_available is not True:
+            self.log.warn("ghost estimate not started: monitor unavailable")
+            return False
         self.state.ghost_estimate = bool(running)
-        self.state.message = (
+        if announce:
+            self._set_status(
+                "ghost estimate started" if running else "ghost estimate stopped"
+            )
+        self.log.info(
             "ghost estimate started" if running else "ghost estimate stopped"
         )
-        self.log.info(self.state.message)
         self._store_last()
+        return True
 
     def due(self, now: float | None = None) -> bool:
-        """True when auto-refresh is on and its interval has elapsed."""
+        """True when auto-refresh is on and its interval has elapsed.
 
-        if not self.state.autorefresh:
+        Automatic refreshes need the monitor: while it is missing or not
+        confirmed yet the timer waits.
+        """
+
+        if not self.state.autorefresh or self.monitor_available is not True:
             return False
         moment = self._clock() if now is None else now
         return moment - self.state.last_refresh >= self.state.interval
@@ -815,6 +1114,8 @@ class TrayApp:
         gtk: dict,
         watcher: GhostWatcher | None = None,
         log=None,
+        *,
+        ghost_output: str = "auto",
     ) -> None:
         """Build the indicator and menu; GTK must already be initialised."""
 
@@ -825,6 +1126,10 @@ class TrayApp:
         self.Gdk = gtk["Gdk"]
         self.GdkPixbuf = gtk["GdkPixbuf"]
         self.watcher = watcher
+        # The e-ink output probe looks for the same monitor the capture uses
+        # (`ghost.output`, `auto` by default) and runs with the serial poll.
+        self._ghost_output = ghost_output
+        self._last_output_poll: float | None = None
         self._busy = False
         self._pending = None
         self._updating = False
@@ -836,6 +1141,9 @@ class TrayApp:
         # Last ghost sampling error written to the log, so a persistent
         # failure is reported once and not on every tick.
         self._logged_ghost_error: str | None = None
+        # Last known monitor reachability: on False -> True the estimate is
+        # reset, because the panel state is unknown across the gap.
+        self._last_available: bool | None = None
         # Zone clearing: the overlay flasher and the last note shown in the
         # ghost window. The settings themselves come from the controller's
         # saved state (the ghost window edits them), so editor and
@@ -1097,6 +1405,9 @@ class TrayApp:
         self._busy = True
         if not quiet:
             self.controller.state.message = "working…"
+            self.controller.state.severity = SEVERITY_WORKING
+            self.controller.state.error_detail = ""
+            self.controller.state.error_kind = None
             self.refresh_menu()
 
         def target():
@@ -1122,19 +1433,72 @@ class TrayApp:
         """Start the auto-refresh timer and restore the saved configuration."""
 
         self.GLib.timeout_add_seconds(1, self._on_timer)
+        # The output probe runs before restore: a tray started with the panel
+        # off must not write to the serial, because a command sent to a
+        # switched-off panel can wedge the monitor's firmware.
+        self._check_display_output()
         self._run(self.controller.restore)
 
     def _on_timer(self):
-        if not self._busy:
+        self._check_display_output()
+        if not self._busy and self.controller.display_present is not False:
             if self.controller.due():
                 self._run(self._refresh_action, False)
             elif self.controller.poll_due():
                 self._run(self.controller.sync, quiet=True)
+        self._watch_availability()
         self._ghost_tick()
         # No periodic window refresh here: every state change reaches the
         # window through refresh_menu(), and a timer that rewrote the widgets
         # would undo a slider drag or a value being typed.
         return True
+
+    def _check_display_output(self) -> None:
+        """Tell the controller whether the e-ink display output is present.
+
+        Runs with the serial poll; the probe returns None when it cannot
+        tell (Wayland, no display, no EDID names), which leaves the
+        serial-only behaviour.
+        """
+
+        now = time.monotonic()
+        if (
+            self._last_output_poll is not None
+            and now - self._last_output_poll < POLL_SECONDS
+        ):
+            return
+        self._last_output_poll = now
+        try:
+            present = monitor_output_present(
+                self.Gdk, self._ghost_output, self.controller.panel.edid_names
+            )
+        except Exception as exc:  # pragma: no cover - depends on the X server
+            self.log.warn(f"display check failed: {exc}")
+            return
+        self.controller.set_display_present(present)
+
+    def _watch_availability(self) -> None:
+        """Reset the estimate when the monitor comes back.
+
+        The panel did a startup refresh while the monitor was off, so the
+        areas estimated before the gap say nothing about its current ink.
+        The capture re-resolves its monitor too: the X11 backend caches the
+        Gdk monitor it resolved on the first grab. When the saved
+        configuration was never applied (the panel was off, or the session
+        failed), it is restored now.
+        """
+
+        available = self.controller.monitor_available
+        if self._last_available is False and available is True:
+            self.log.info("monitor returned: ghost estimate reset")
+            capturer = getattr(self.watcher, "capturer", None)
+            reset = getattr(capturer, "reset", None)
+            if callable(reset):
+                reset()
+            self._ghost_reset()
+            if getattr(self.controller, "restore_pending", False):
+                self._run(self.controller.restore)
+        self._last_available = available
 
     # -- view updates ------------------------------------------------------
 
@@ -1180,7 +1544,7 @@ class TrayApp:
         if status != self._status_label:
             self.status_item.set_label(status)
             self._status_label = status
-        self._update_menu_status_icon(state.message)
+        self._update_menu_status_icon(state.message, state.severity)
         self._update_group_labels(info, state)
         self._updating = True
         try:
@@ -1200,10 +1564,12 @@ class TrayApp:
         if self._window is not None:
             self._window.update()
 
-    def _update_menu_status_icon(self, message: str) -> None:
+    def _update_menu_status_icon(self, message: str, severity: str = "") -> None:
         """Swap the status icon only when the resolved theme icon changed."""
 
-        candidates = ICON_INFO if not message else status_symbol(message)[0]
+        candidates = (
+            ICON_INFO if not message else status_symbol(message, severity)[0]
+        )
         name = icon_name(self.Gtk, candidates)
         if name == self._status_icon_name:
             return
@@ -1288,11 +1654,15 @@ class TrayApp:
         self._ghost_window.follow(self.watcher)
 
     def set_ghost_estimate(self, running: bool) -> None:
-        """Stop or restart sampling from the ghost window and remember it."""
+        """Stop or restart sampling from the ghost window and remember it.
 
-        self.controller.set_ghost_estimate(running)
-        if self.watcher is not None:
-            self.watcher.set_paused(not running)
+        Starting is refused while the monitor is missing: the state keeps the
+        switch off and the ghost window says why.
+        """
+
+        if self.controller.set_ghost_estimate(running):
+            if self.watcher is not None:
+                self.watcher.set_paused(not running)
         self._refresh_ghost_view()
 
     def _refresh_action(self, hard: bool) -> bool:
@@ -1334,8 +1704,13 @@ class TrayApp:
         # The window's Stop/Start button: a stopped estimate never samples,
         # so the automatic clearing (which runs after a fresh sample) pauses
         # too while the last result stays on screen. The controller's state
-        # is the persisted source, also restored at startup.
-        watcher.set_paused(not self.controller.state.ghost_estimate)
+        # is the persisted source, also restored at startup. Sampling also
+        # waits for a reachable monitor: with it missing there is nothing to
+        # estimate, and the switch was already saved off.
+        watcher.set_paused(
+            not self.controller.state.ghost_estimate
+            or self.controller.monitor_available is not True
+        )
         if self._clearer.busy:
             # The overlay is not content: never let a sample see the flash.
             if visible:
@@ -1690,7 +2065,13 @@ def run_tray(
             log.error(f"ghost estimate: {watcher.error}")
         else:
             log.warn(f"ghost estimate: {watcher.error}")
-    app = TrayApp(controller, gtk, watcher=watcher, log=log)
+    app = TrayApp(
+        controller,
+        gtk,
+        watcher=watcher,
+        log=log,
+        ghost_output=settings["output"],
+    )
     _install_signal_handlers(gtk, app.quit)
     app.start()
     gtk["Gtk"].main()

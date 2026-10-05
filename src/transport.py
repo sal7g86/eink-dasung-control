@@ -12,11 +12,54 @@ from .protocol import WIRE_LENGTH
 
 
 class TransportError(RuntimeError):
-    """Communication with the monitor failed."""
+    """Communication with the monitor failed.
+
+    `reason` is a stable token for the user interface (see `errors.py`) and
+    `device` the serial path the failure is about; the message keeps the
+    technical detail for the log and for `doctor`.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason: str | None = None,
+        device: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.device = device
+
+
+# Stable failure tokens attached to TransportError; errors.short_error turns
+# them into the short tray messages and never parses the detailed text.
+REASON_NOT_FOUND = "not_found"
+REASON_MULTIPLE = "multiple"
+REASON_OPEN = "open"
+REASON_NO_PERMISSION = "no_permission"
+REASON_PORT_BUSY = "port_busy"
+REASON_LOCKED = "locked"
+REASON_IO = "io"
+REASON_NO_RESPONSE = "no_response"
 
 
 CH340_VID = 0x1A86
 CH340_PID = 0x7523
+
+
+def _open_error(device: str, exc: Exception) -> TransportError:
+    """Wrap a failed open with the reason the tray shows in its status line."""
+
+    text = str(exc).lower()
+    if "permission" in text or "access is denied" in text:
+        reason = REASON_NO_PERMISSION
+    elif "busy" in text:
+        reason = REASON_PORT_BUSY
+    else:
+        reason = REASON_OPEN
+    return TransportError(
+        f"cannot open {device}: {exc}", reason=reason, device=device
+    )
 
 
 def serial_devices() -> list[tuple[str, int | None, int | None, str]]:
@@ -59,14 +102,16 @@ def find_monitor_device(*, refresh: bool = False) -> str:
         rendered = ", ".join(matches)
         raise TransportError(
             "multiple CH340 devices with USB ID 1a86:7523 were found: "
-            f"{rendered}; select the monitor with --device"
+            f"{rendered}; select the monitor with --device",
+            reason=REASON_MULTIPLE,
         )
 
     visible = ", ".join(device for device, *_rest in devices) or "none"
     raise TransportError(
         "Dasung CH340 (USB 1a86:7523) was not found; "
         f"visible serial devices: {visible}. Reconnect/power on the monitor, "
-        "then check 'lsusb' and the kernel log"
+        "then check 'lsusb' and the kernel log",
+        reason=REASON_NOT_FOUND,
     )
 
 
@@ -105,16 +150,14 @@ class SerialTransport:
             self._serial = self._create_serial(device)
         except (OSError, serial.SerialException) as exc:
             if self.device != "auto":
-                raise TransportError(f"cannot open {device}: {exc}") from exc
+                raise _open_error(device, exc) from exc
             # The cached auto-detected path may be stale (replug or port
             # renumbering): re-enumerate once and retry.
             device = find_monitor_device(refresh=True)
             try:
                 self._serial = self._create_serial(device)
             except (OSError, serial.SerialException) as retry_exc:
-                raise TransportError(
-                    f"cannot open {device}: {retry_exc}"
-                ) from retry_exc
+                raise _open_error(device, retry_exc) from retry_exc
 
     def _create_serial(self, device: str) -> serial.Serial:
         """Open one CH340 with the confirmed conservative settings."""
@@ -155,7 +198,8 @@ class SerialTransport:
             written = self._serial.write(request)
             if written != len(request):
                 raise TransportError(
-                    f"short serial write: wrote {written} of {len(request)} bytes"
+                    f"short serial write: wrote {written} of {len(request)} bytes",
+                    reason=REASON_IO,
                 )
             # flush() waits for the bytes to leave the host buffer; the
             # monitor answers only after a complete frame, so this keeps the
@@ -164,7 +208,9 @@ class SerialTransport:
         except TransportError:
             raise
         except (OSError, serial.SerialException) as exc:
-            raise TransportError(f"serial communication failed: {exc}") from exc
+            raise TransportError(
+                f"serial communication failed: {exc}", reason=REASON_IO
+            ) from exc
 
     def send(self, request: bytes) -> None:
         """Write one frame and return after it has left the host buffer."""
@@ -178,12 +224,15 @@ class SerialTransport:
         try:
             response = self._serial.read(WIRE_LENGTH)
         except (OSError, serial.SerialException) as exc:
-            raise TransportError(f"serial communication failed: {exc}") from exc
+            raise TransportError(
+                f"serial communication failed: {exc}", reason=REASON_IO
+            ) from exc
 
         if len(response) != WIRE_LENGTH:
             raise TransportError(
                 f"incomplete response: received {len(response)} of "
-                f"{WIRE_LENGTH} ASCII characters"
+                f"{WIRE_LENGTH} ASCII characters",
+                reason=REASON_NO_RESPONSE,
             )
         return response
 

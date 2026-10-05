@@ -113,7 +113,8 @@ class DasungClient:
                 raise TransportError(
                     f"{exc}; selector 0x{int(parameter):02X} is not confirmed on "
                     "this model, so a missing response may mean this firmware "
-                    "does not implement it"
+                    "does not implement it",
+                    reason=getattr(exc, "reason", None),
                 ) from exc
             raise
         for _skip in range(UNSOLICITED_FRAME_SKIPS):

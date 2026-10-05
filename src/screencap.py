@@ -213,6 +213,55 @@ def x11_monitor_aliases(monitors) -> list[tuple[str, ...]]:
     return aliases
 
 
+def monitor_output_present(
+    gdk, wanted: str = "auto", panel_names=None
+) -> bool | None:
+    """Whether the e-ink display output is currently present (X11).
+
+    The panel's HDMI receiver disappears when it is switched off, while the
+    CH340 stays powered and its serial selectors keep answering the stored
+    values: the output is the confirmed signal that tells "panel off" from
+    "panel on". The matching is the capture's: the EDID model names of the
+    panel profiles (through python-xlib) and the configured `ghost.output`.
+    Returns None when the check cannot tell (Wayland, no display, or `auto`
+    without EDID names), so the caller keeps the serial-only behaviour; it
+    never falls back to "the only monitor", which would mistake the desktop
+    screen for the panel.
+    """
+
+    if os.environ.get("WAYLAND_DISPLAY"):
+        return None
+    display = gdk.Display.get_default()
+    if display is None:
+        return None
+    monitors = [
+        display.get_monitor(index) for index in range(display.get_n_monitors())
+    ]
+    if not monitors:
+        return None
+    aliases = x11_monitor_aliases(monitors)
+    if wanted in (None, "", "auto"):
+        needles = tuple(panel_names) if panel_names else ("paperlike",)
+        if not aliases:
+            # Gdk only reports the output name (DP-1, HDMI-0) on X11; without
+            # the EDID names the model cannot be identified.
+            return None
+    else:
+        needles = (wanted,)
+    needles = tuple(
+        str(needle).strip().lower() for needle in needles if str(needle).strip()
+    )
+    for index, monitor in enumerate(monitors):
+        names = [monitor.get_model() or ""]
+        if index < len(aliases):
+            names.extend(aliases[index])
+        if any(
+            needle in str(name).lower() for name in names for needle in needles
+        ):
+            return True
+    return False
+
+
 def load_restore_token(path: Path | None = None) -> str | None:
     """Read the saved ScreenCast restore token; a broken file means none."""
 

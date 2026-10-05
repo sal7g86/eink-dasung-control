@@ -47,6 +47,40 @@ indicator labels (such as KDE), the label shows the current mode.
 Both windows remain on the workspace where they are opened; choosing one
 again from the menu moves it to the workspace in use.
 
+The first menu row is the status line (`reloaded`, `monitor changed: …`,
+`auto-refresh on`, …). Failures are compressed to one short sentence —
+`monitor not found (off or unplugged?)`, `monitor not responding`,
+`monitor busy — another dasungctl is running`, `no access to /dev/ttyUSB0
+(permissions)` — while the full error stays in the log and in the tooltip of
+the `Controls…` window's status line; the row's icon and colour follow the
+severity, not the text.
+
+## Monitor availability
+
+Two signals decide whether the monitor is usable. The serial exchanges are
+the first: after two failed reads in a row the tray declares the monitor
+unavailable. The second is the e-ink display output (X11): the panel's HDMI
+receiver disappears when it is switched off, while the CH340 stays powered
+and keeps answering the stored values, so the output is the only confirmed
+way to tell "off" from "on". The startup check is conclusive immediately; a
+later miss needs two in a row, so a display reconfiguration does not switch
+the automatic features off. On Wayland, or on X11 without python-xlib and
+without `ghost.output` naming the output, the check cannot tell and only the
+serial exchanges are used.
+
+A panel known to be off is never talked to: the tray skips `Reload from
+monitor`, the refresh actions and the serial poll, and a tray started with
+the panel off skips the saved configuration (it is applied when the panel
+returns). A command sent to a switched-off panel can wedge the monitor's
+serial firmware: if the tray keeps reporting `monitor not responding` while
+the panel is on, replug the monitor's USB cable.
+
+In every case the tray switches `Auto-refresh` and the ghost estimate off and
+saves the choice. Neither switch can be turned back on while the monitor is
+unavailable; when it returns the tray writes `monitor connected`, and the
+ghost estimate starts from a clean model only if the user enables it again
+(the panel refreshed while it was off).
+
 Started from a terminal, the tray mirrors its log lines on stderr and Ctrl+C
 exits cleanly like the `Quit` menu entry; SIGTERM (for example at session
 logout) is handled the same way. The exit saves the ghost estimate, closes

@@ -21,9 +21,12 @@ efficiency ``gamma`` (less than 1), so ``A`` approaches ``S`` but does not
 reach it; untouched pixels keep their error, which is why a ghost stays until
 the area is rewritten or a refresh clears the panel.
 
-Only dark ghosts are counted: old dark content that the current light content
-leaves visible. A dark pixel that is lighter than intended is imperfect ink,
-not a distinct artifact, so positive errors do not create elements.
+Both polarities are reported. Negative errors are dark ghosts: old dark
+content that the current light content leaves visible (erasing is the weaker
+direction on this panel). Positive errors are light ghosts: light content
+that the current dark content leaves visible; they also include dark ink that
+has just been written and is not fully saturated, so a freshly drawn dark
+window can leave light areas until they are rewritten.
 """
 
 from __future__ import annotations
@@ -94,7 +97,9 @@ class GhostElement:
     """One estimated ghost area, in screen (source) pixel coordinates.
 
     ``app``/``fullscreen`` describe the window that was over the area when
-    the ghost formed (None when the window list is unavailable).
+    the ghost formed (None when the window list is unavailable). ``dark`` is
+    the polarity: True for a dark residue on light content, False for a light
+    residue on dark content.
     """
 
     x: int
@@ -110,9 +115,14 @@ class GhostElement:
 
 @dataclass(frozen=True)
 class GhostResult:
-    """The model state after one sample; level and severity are 0..100."""
+    """The model state after one sample; levels and severity are 0..100.
+
+    ``level`` is the total over both polarities; ``light_level`` is the part
+    contributed by light ghosts and is never larger than ``level``.
+    """
 
     level: int
+    light_level: int
     elements: tuple[GhostElement, ...]
     dirty_fraction: float
     changed_pixels: int
@@ -196,17 +206,24 @@ class GhostModel:
                 for y in range(y0, y1):
                     base = y * width
                     self._cell_of[base + x0 : base + x1] = values
-        self._onset = [0.0] * self._cell_count
+        # Onsets are per polarity: the same cell can hold a dark and a light
+        # residue, and each area's age starts when it formed.
+        self._onset_dark = [0.0] * self._cell_count
+        self._onset_light = [0.0] * self._cell_count
         # Per-cell annotation: application and fullscreen flag recorded when
         # the cell first became dirty, so a label survives the window closing.
+        # It is shared by both polarities: the window behind the point is the
+        # same whichever residue formed there.
         self._cell_app: list[str | None] = [None] * self._cell_count
         self._cell_full = [False] * self._cell_count
         # Last sample's per-cell dirty statistics; None before the first
         # sample and after a reset until the next one.
         self._counts: list[int] | None = None
         self._sums: list[int] | None = None
-        self._darks: list[int] | None = None
-        self._dirty: list[int] = []
+        self._light_counts: list[int] | None = None
+        self._light_sums: list[int] | None = None
+        self._dirty_dark: list[int] = []
+        self._dirty_light: list[int] = []
 
     @property
     def result(self) -> GhostResult | None:
@@ -260,14 +277,16 @@ class GhostModel:
 
         wall = time.time() if wall is None else wall
         self._error = array("h", bytes(2 * self._size))
-        self._onset = [0.0] * self._cell_count
+        self._onset_dark = [0.0] * self._cell_count
+        self._onset_light = [0.0] * self._cell_count
         self._cell_app = [None] * self._cell_count
         self._cell_full = [False] * self._cell_count
         # Zero the stored statistics too: the dirty grid is derived from
         # them, so a reset must not leave the previous sample's cells dirty.
         self._counts = [0] * self._cell_count
         self._sums = [0] * self._cell_count
-        self._darks = [0] * self._cell_count
+        self._light_counts = [0] * self._cell_count
+        self._light_sums = [0] * self._cell_count
         if self._started:
             self._shown[:] = self._previous
         self._result = self._build_result(now, wall, changed=0, stats=None)
@@ -316,7 +335,8 @@ class GhostModel:
             for index in range(base + left, base + right):
                 shown[index] = previous[index]
                 error[index] = 0
-        counts, sums, darks = self._counts, self._sums, self._darks
+        counts, sums = self._counts, self._sums
+        light_counts, light_sums = self._light_counts, self._light_sums
         first_row = top // self.cell_width
         last_row = (
             min(self.rows, (bottom - 1) // self.cell_width + 1)
@@ -332,13 +352,16 @@ class GhostModel:
         for row in range(first_row, last_row):
             for column in range(first_column, last_column):
                 cell = row * self.columns + column
-                self._onset[cell] = 0.0
+                self._onset_dark[cell] = 0.0
+                self._onset_light[cell] = 0.0
                 self._cell_app[cell] = None
                 self._cell_full[cell] = False
-                if counts is not None and sums is not None and darks is not None:
+                if counts is not None and sums is not None:
                     counts[cell] = 0
                     sums[cell] = 0
-                    darks[cell] = 0
+                if light_counts is not None and light_sums is not None:
+                    light_counts[cell] = 0
+                    light_sums[cell] = 0
         self._result = self._build_result(now, wall, changed=0, stats=None)
         return self._result
 
@@ -361,7 +384,8 @@ class GhostModel:
         gamma_erase = self.gamma_erase
         counts = [0] * self._cell_count
         sums = [0] * self._cell_count
-        darks = [0] * self._cell_count
+        light_counts = [0] * self._cell_count
+        light_sums = [0] * self._cell_count
         changed = 0
 
         for index in range(self._size):
@@ -375,16 +399,19 @@ class GhostModel:
                 error[index] = shown_value - value
                 changed += 1
             level = error[index]
-            # Only dark ghosts matter: old dark content left visible on the
-            # current light content. Lighter-than-intended dark pixels are
-            # imperfect ink, not a ghost users hunt.
+            # The two gates partition the content: a dark ghost is old dark
+            # ink left on light content, a light ghost is old light content
+            # left on dark content (including dark ink not fully saturated).
             if level <= -min_error and value >= LIGHT_CONTENT:
                 cell = cell_of[index]
                 counts[cell] += 1
                 sums[cell] += -level
-                darks[cell] += 1
+            elif level >= min_error and value < LIGHT_CONTENT:
+                cell = cell_of[index]
+                light_counts[cell] += 1
+                light_sums[cell] += level
         previous[:] = frame
-        return changed, (counts, sums, darks)
+        return changed, (counts, sums, light_counts, light_sums)
 
     def _build_result(
         self,
@@ -396,41 +423,69 @@ class GhostModel:
         annotate=None,
     ) -> GhostResult:
         if stats is not None:
-            self._counts, self._sums, self._darks = stats
+            (
+                self._counts,
+                self._sums,
+                self._light_counts,
+                self._light_sums,
+            ) = stats
         elif self._counts is None:
             self._counts = [0] * self._cell_count
             self._sums = [0] * self._cell_count
-            self._darks = [0] * self._cell_count
+            self._light_counts = [0] * self._cell_count
+            self._light_sums = [0] * self._cell_count
         counts = self._counts
         sums = self._sums
-        darks = self._darks
-        assert counts is not None and sums is not None and darks is not None
+        light_counts = self._light_counts
+        light_sums = self._light_sums
+        assert counts is not None and sums is not None
+        assert light_counts is not None and light_sums is not None
 
-        dirty: list[int] = []
+        dirty_dark: list[int] = []
+        dirty_light: list[int] = []
         for cell in range(self._cell_count):
             area = self._cell_area[cell]
             minimum = max(
                 self.min_cell_pixels, int(area * self.min_cell_fraction)
             )
-            if counts[cell] >= minimum:
-                if self._onset[cell] == 0.0:
-                    self._onset[cell] = now
-                    self._annotate_cell(cell, annotate)
-                dirty.append(cell)
-            else:
-                self._onset[cell] = 0.0
+            dark = counts[cell] >= minimum
+            light = light_counts[cell] >= minimum
+            if dark and self._onset_dark[cell] == 0.0:
+                self._onset_dark[cell] = now
+                self._annotate_cell(cell, annotate)
+            if light and self._onset_light[cell] == 0.0:
+                self._onset_light[cell] = now
+                self._annotate_cell(cell, annotate)
+            if not dark:
+                self._onset_dark[cell] = 0.0
+            if not light:
+                self._onset_light[cell] = 0.0
+            if not dark and not light:
                 self._cell_app[cell] = None
                 self._cell_full[cell] = False
-        self._dirty = dirty
+            if dark:
+                dirty_dark.append(cell)
+            if light:
+                dirty_light.append(cell)
+        self._dirty_dark = dirty_dark
+        self._dirty_light = dirty_light
 
-        total_abs = sum(sums[cell] for cell in dirty)
-        dirty_pixels = sum(counts[cell] for cell in dirty)
+        dark_abs = sum(sums[cell] for cell in dirty_dark)
+        light_abs = sum(light_sums[cell] for cell in dirty_light)
+        dirty_pixels = sum(counts[cell] for cell in dirty_dark) + sum(
+            light_counts[cell] for cell in dirty_light
+        )
+        total_abs = dark_abs + light_abs
         level = min(
             100, round(100.0 * total_abs / (self._size * REFERENCE_LEVEL))
+        )
+        light_level = min(
+            100, round(100.0 * light_abs / (self._size * REFERENCE_LEVEL))
         )
         elements = self._elements(now)
         return GhostResult(
             level=level,
+            light_level=light_level,
             elements=elements,
             dirty_fraction=dirty_pixels / self._size,
             changed_pixels=changed,
@@ -466,12 +521,16 @@ class GhostModel:
             self._cell_app[cell] = None
             self._cell_full[cell] = False
 
-    def _components(self) -> list[list[int]]:
-        """Dirty cells grouped by 8-connectivity: one list per area."""
+    def _components(self, cells: Sequence[int]) -> list[list[int]]:
+        """Dirty cells grouped by 8-connectivity: one list per area.
 
-        if not self._dirty:
+        Components are built per polarity, so a dark area and a light halo
+        touching it stay two distinct elements.
+        """
+
+        if not cells:
             return []
-        dirty = set(self._dirty)
+        dirty = set(cells)
         components: list[list[int]] = []
         seen: set[int] = set()
         for start in sorted(dirty):
@@ -479,10 +538,10 @@ class GhostModel:
                 continue
             stack = [start]
             seen.add(start)
-            cells: list[int] = []
+            group: list[int] = []
             while stack:
                 cell = stack.pop()
-                cells.append(cell)
+                group.append(cell)
                 row, column = divmod(cell, self.columns)
                 for row_step in (-1, 0, 1):
                     for column_step in (-1, 0, 1):
@@ -496,21 +555,23 @@ class GhostModel:
                         if other in dirty and other not in seen:
                             seen.add(other)
                             stack.append(other)
-            components.append(cells)
+            components.append(group)
         return components
 
     def _element_from_cells(
-        self, cells: Sequence[int], now: float
+        self, cells: Sequence[int], now: float, *, dark: bool
     ) -> GhostElement:
-        """One ghost area from a group of dirty cells."""
+        """One ghost area from a group of dirty cells of one polarity."""
 
-        counts = self._counts
-        sums = self._sums
-        darks = self._darks
-        assert counts is not None and sums is not None and darks is not None
+        if dark:
+            counts, sums = self._counts, self._sums
+            onset_of = self._onset_dark
+        else:
+            counts, sums = self._light_counts, self._light_sums
+            onset_of = self._onset_light
+        assert counts is not None and sums is not None
         pixel_count = sum(counts[cell] for cell in cells)
         abs_sum = sum(sums[cell] for cell in cells)
-        dark_count = sum(darks[cell] for cell in cells)
         x0, y0 = self.width, self.height
         x1 = y1 = 0
         onset = now
@@ -524,8 +585,8 @@ class GhostModel:
             y0 = min(y0, top)
             x1 = max(x1, right)
             y1 = max(y1, bottom)
-            if self._onset[cell] and self._onset[cell] < onset:
-                onset = self._onset[cell]
+            if onset_of[cell] and onset_of[cell] < onset:
+                onset = onset_of[cell]
         severity = min(
             100, round(100.0 * (abs_sum / pixel_count) / REFERENCE_SEVERITY)
         )
@@ -540,26 +601,32 @@ class GhostModel:
                 1, round((y1 - y0) * self.source_height / self.height)
             ),
             severity=severity,
-            dark=dark_count * 2 >= pixel_count,
+            dark=dark,
             age=max(0.0, now - onset),
             app=self._cell_app[best],
             fullscreen=bool(self._cell_full[best]),
         )
 
     def _elements(self, now: float) -> tuple[GhostElement, ...]:
-        """Group dirty cells into connected ghost areas."""
+        """Group dirty cells into connected ghost areas, both polarities."""
 
         elements = [
-            self._element_from_cells(cells, now) for cells in self._components()
+            self._element_from_cells(cells, now, dark=True)
+            for cells in self._components(self._dirty_dark)
         ]
+        elements.extend(
+            self._element_from_cells(cells, now, dark=False)
+            for cells in self._components(self._dirty_light)
+        )
         elements.sort(key=lambda item: (item.y, item.x))
         return tuple(elements)
 
     def preview_rgb(self, width: int, height: int) -> bytes:
         """Ghost-only preview at the requested size, as RGB bytes.
 
-        The preview shows the estimated dark residue on a neutral background,
-        with the cell grid faint and the element boxes outlined.
+        The preview shows the estimated residue on a neutral background —
+        dark ghosts in grey, light ghosts in a warm tint — with the cell grid
+        faint and the element boxes outlined in their polarity's colour.
         """
 
         if width <= 0 or height <= 0:
@@ -579,14 +646,31 @@ class GhostModel:
         for model_y in rows:
             line = model_y * self.width
             for model_x in columns:
-                darkness = 0
                 value = error[line + model_x]
-                if value <= -min_error and content[line + model_x] >= LIGHT_CONTENT:
-                    darkness = min(200, -value)
-                gray = max(0, base - darkness)
-                if model_x % self.cell_width == 0 or model_y % self.cell_width == 0:
-                    gray = min(gray, 215)
-                buffer[index] = buffer[index + 1] = buffer[index + 2] = gray
+                content_value = content[line + model_x]
+                if value <= -min_error and content_value >= LIGHT_CONTENT:
+                    # Dark residue: a darker grey on the neutral background.
+                    gray = max(0, base - min(200, -value))
+                    red = green = blue = gray
+                elif value >= min_error and content_value < LIGHT_CONTENT:
+                    # Light residue: a warm tint, because a value lighter
+                    # than the background could not be seen on its own.
+                    lightness = min(200, value)
+                    red = min(255, base + lightness // 4)
+                    green = max(0, base - lightness // 2)
+                    blue = max(0, base - lightness)
+                else:
+                    red = green = blue = base
+                if (
+                    model_x % self.cell_width == 0
+                    or model_y % self.cell_width == 0
+                ):
+                    red = min(red, 215)
+                    green = min(green, 215)
+                    blue = min(blue, 215)
+                buffer[index] = red
+                buffer[index + 1] = green
+                buffer[index + 2] = blue
                 index += 3
         self._draw_boxes(buffer, width, height)
         return bytes(buffer)
@@ -596,8 +680,10 @@ class GhostModel:
 
         if self._result is None:
             return
-        red, green, blue = 30, 90, 220
         for element in self._result.elements:
+            red, green, blue = (
+                (30, 90, 220) if element.dark else (230, 140, 30)
+            )
             x0 = element.x * width // self.source_width
             y0 = element.y * height // self.source_height
             x1 = min(
@@ -1019,10 +1105,14 @@ class GhostWatcher:
             self._alerted_at = moment
             self.save_state(force=True)
             count = len(self.result.elements)
+            light = sum(
+                1 for element in self.result.elements if not element.dark
+            )
             areas = "area" if count == 1 else "areas"
+            kind = f" ({light} light)" if light else ""
             return (
-                f"Ghost estimate: {count} {areas}{self._labels_text()}, "
-                f"level {level}/100"
+                f"Ghost estimate: {count} {areas}{kind}"
+                f"{self._labels_text()}, level {level}/100"
             )
         if not self._armed and level < self.threshold * ALERT_REARM_FRACTION:
             self._armed = True

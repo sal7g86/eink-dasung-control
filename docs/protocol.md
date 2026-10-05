@@ -220,6 +220,19 @@ bottom to top on the bezel: `C`, `M`, `-`, `+`, lamp, and power.
 | lamp | long press | also selected the next frontlight mode |
 | power | press | power on/off; all stored settings survived the cycle |
 
+The power switch is invisible to the serial interface: on 2026-10-04 the
+panel was switched off (USB and HDMI still connected) and every confirmed
+selector answered the stored values (`contrast` 6, `mode` 2, `speed` 1,
+`frontlight_mode` 3, `temperature` 70, `frontlight` 19, selector `03` 1,
+`mux` 1, selector `11` 0) exactly as while it was on, because the CH340
+stays powered over USB. The monitor's HDMI output disappears with the panel
+(and so does the touchscreen HID interface), so a switched-off panel is
+detected from the display output, never from the serial reads; see
+[tray.md](tray.md). A command sent while the panel is off can also wedge the
+serial firmware: after a tray restore wrote to the off panel, no selector
+answered again (reads included) until the USB cable was re-plugged; the tray
+therefore never opens the serial port while the output is missing.
+
 The 2026-09-18 tests found no brightness control: the lamp button alone never
 changed the `frontlight` level (it stayed at `25` while on and `0` when off),
 `-`/`+` change contrast, and holding `M` changes speed. On 2026-09-28 the

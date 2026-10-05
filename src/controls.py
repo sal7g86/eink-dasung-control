@@ -1,8 +1,9 @@
 """Monitor control operations used by the tray application.
 
 The functions mutate a small state object exposing `info`, `message` and
-`custom_temperature`, and keep the serial quirks documented in
-`docs/protocol.md`:
+`custom_temperature` (plus `severity`, `error_detail` and `error_kind`, which
+carry the short status text, the detail for the window tooltip and the kind
+of failure), and keep the serial quirks documented in `docs/protocol.md`:
 a manual temperature marks the project's custom frontlight mode, presets send
 their temperature before the mode, and no read-back follows a mode write.
 """
@@ -12,6 +13,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from .client import DasungClient
+from .errors import SEVERITY_ERROR, error_kind, short_error
 from .panels import get_panel
 from .protocol import DisplayMode, ProtocolError
 from .transport import TransportError
@@ -31,6 +33,24 @@ LABELS = {
 }
 
 
+def _ok(state, message: str) -> None:
+    """Publish a successful operation on the shared state object."""
+
+    state.message = message
+    state.severity = ""
+    state.error_detail = ""
+    state.error_kind = None
+
+
+def _error(state, exc: Exception, prefix: str = "") -> None:
+    """Publish a failed operation: short message, full detail for the tooltip."""
+
+    state.message = f"{prefix}{short_error(exc)}"
+    state.severity = SEVERITY_ERROR
+    state.error_detail = str(exc)
+    state.error_kind = error_kind(exc)
+
+
 def set_temperature(client: DasungClient, state, value: int, panel=None) -> bool:
     """Set a manual temperature and mark the frontlight mode as custom.
 
@@ -42,22 +62,19 @@ def set_temperature(client: DasungClient, state, value: int, panel=None) -> bool
     try:
         client.set_temperature(value, wait=True)
     except WRITE_ERRORS as exc:
-        state.message = f"error: {exc}"
+        _error(state, exc)
         return False
     state.info = replace(state.info, temperature=value)
     state.custom_temperature = value
     try:
         client.set_frontlight_mode(profile.custom_frontlight_mode, wait=True)
     except WRITE_ERRORS as exc:
-        state.message = (
-            f"Temperature set to {value}; "
-            f"custom frontlight mode failed: {exc}"
-        )
+        _error(state, exc, prefix="temperature set; frontlight mode failed: ")
         return False
     state.info = replace(
         state.info, frontlight_mode=profile.custom_frontlight_mode
     )
-    state.message = f"Temperature set to {value}; frontlight mode custom"
+    _ok(state, f"Temperature set to {value}; frontlight mode custom")
     return True
 
 
@@ -81,13 +98,13 @@ def set_frontlight_mode(
         try:
             client.set_temperature(preset_temperature, wait=True)
         except WRITE_ERRORS as exc:
-            state.message = f"error: {exc}"
+            _error(state, exc)
             return False
         state.info = replace(state.info, temperature=preset_temperature)
     try:
         client.set_frontlight_mode(value, wait=True)
     except WRITE_ERRORS as exc:
-        state.message = f"error: {exc}"
+        _error(state, exc)
         return False
     state.info = replace(state.info, frontlight_mode=value)
     message = (
@@ -97,7 +114,7 @@ def set_frontlight_mode(
         message += f", temperature {preset_temperature}"
     else:
         message += ", temperature unchanged"
-    state.message = message
+    _ok(state, message)
     return True
 
 
@@ -118,11 +135,11 @@ def apply_field(
             setter = getattr(client, f"set_{name}")
             setter(value, wait=True)
     except WRITE_ERRORS as exc:
-        state.message = f"error: {exc}"
+        _error(state, exc)
         return False
     state.info = replace(state.info, **{name: value})
     if name == "mode":
-        state.message = f"mode set to {profile.display_mode_name(value)}"
+        _ok(state, f"mode set to {profile.display_mode_name(value)}")
     else:
-        state.message = f"{LABELS.get(name, name)} set to {value}"
+        _ok(state, f"{LABELS.get(name, name)} set to {value}")
     return True

@@ -8,7 +8,7 @@ import fcntl
 from typing import Iterator
 
 from . import paths
-from .transport import TransportError
+from .transport import REASON_LOCKED, TransportError
 
 
 @contextmanager
@@ -28,7 +28,8 @@ def serial_lock(path: Path | None = None) -> Iterator[None]:
         except OSError as exc:
             raise TransportError(
                 "another dasungctl process is already using the monitor; "
-                "stop it before starting a new session"
+                "stop it before starting a new session",
+                reason=REASON_LOCKED,
             ) from exc
         try:
             handle.seek(0)

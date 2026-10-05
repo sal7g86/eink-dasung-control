@@ -10,6 +10,7 @@ from dasungctl.screencap import (
     edid_monitor_name,
     gray_from_channels,
     load_restore_token,
+    monitor_output_present,
     pick_monitor,
     save_restore_token,
     scale_dimensions,
@@ -123,6 +124,77 @@ def test_x11_monitor_aliases_require_a_geometry_match(monkeypatch):
     # Without EDID names (no xlib, no property) no monitor gets aliases.
     monkeypatch.setattr(screencap, "x11_edid_monitor_names", lambda: {})
     assert x11_monitor_aliases([dasung, dell]) == []
+
+
+class OutputMonitor:
+    """Gdk monitor stand-in with a model name and a geometry."""
+
+    def __init__(self, model, x, y, width, height):
+        self._model = model
+        self._geometry = types.SimpleNamespace(
+            x=x, y=y, width=width, height=height
+        )
+
+    def get_model(self):
+        return self._model
+
+    def get_geometry(self):
+        return self._geometry
+
+
+class FakeGdkDisplay:
+    def __init__(self, monitors):
+        self._monitors = monitors
+
+    def get_n_monitors(self):
+        return len(self._monitors)
+
+    def get_monitor(self, index):
+        return self._monitors[index]
+
+
+def _gdk(monitors):
+    """A fake Gdk module whose default display lists `monitors`."""
+
+    display = FakeGdkDisplay(monitors) if monitors is not None else None
+    return types.SimpleNamespace(
+        Display=types.SimpleNamespace(get_default=lambda: display)
+    )
+
+
+def test_monitor_output_present_follows_the_edid_names(monkeypatch):
+    monkeypatch.setattr(
+        screencap,
+        "x11_edid_monitor_names",
+        lambda: {
+            (0, 0, 2560, 1440): "DELL S2725DS",
+            (2560, 0, 942, 1256): "Paperlike H D",
+        },
+    )
+    dell = OutputMonitor("DP-2", 0, 0, 2560, 1440)
+    dasung = OutputMonitor("DP-1", 2560, 0, 942, 1256)
+
+    assert monitor_output_present(_gdk([dell, dasung])) is True
+    # The panel's output is gone: the desktop monitor alone is not the panel.
+    assert monitor_output_present(_gdk([dell])) is False
+    # A configured ghost.output matches the Gdk output name directly.
+    assert monitor_output_present(_gdk([dell]), wanted="DP-2") is True
+    assert monitor_output_present(_gdk([dell]), wanted="HDMI-0") is False
+
+
+def test_monitor_output_present_gives_up_when_it_cannot_tell(monkeypatch):
+    monkeypatch.setattr(screencap, "x11_edid_monitor_names", lambda: {})
+    dell = OutputMonitor("DP-2", 0, 0, 2560, 1440)
+
+    # Without EDID names `auto` cannot identify the panel...
+    assert monitor_output_present(_gdk([dell])) is None
+    # ...but a named output still matches the Gdk model.
+    assert monitor_output_present(_gdk([dell]), wanted="DP-2") is True
+    assert monitor_output_present(_gdk([])) is None
+    assert monitor_output_present(_gdk(None)) is None
+
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+    assert monitor_output_present(_gdk([dell])) is None
 
 
 def test_restore_token_round_trip(tmp_path):

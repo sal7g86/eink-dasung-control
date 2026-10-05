@@ -46,8 +46,8 @@ and has been tested on Linux Mint.
   synchronized wave, even while the screen is in use, and the estimate for
   each area is reset afterwards.
 - `Ghost estimate…` diagnostic window: ghost-only preview, the list of estimated
-  areas with their application, severity and age, the clearing switch, the
-  flash settings editor and a `Test flash` preview.
+  areas with their application, severity, polarity and age, the clearing
+  switch, the flash settings editor and a `Test flash` preview.
 
 ## Compatibility
 
@@ -76,10 +76,11 @@ and has been tested on Linux Mint.
   Python, not from pip, so the tray re-executes itself with the system
   Python whenever it starts in an interpreter without them (a `pipx`
   install, a development virtualenv).
-- **Ghost estimate.** A low-resolution model keeps the old dark ink seen in
-  the captured screen; areas older than a delay are flashed by a borderless
-  overlay, which makes the controller rewrite those pixels. There is no
-  regional serial command, so none is invented.
+- **Ghost estimate.** A low-resolution model keeps the old ink seen in the
+  captured screen, dark residue on light content and light residue on dark
+  content; areas older than a delay are flashed by a borderless overlay,
+  which makes the controller rewrite those pixels. There is no regional
+  serial command, so none is invented.
 
 ## Installation
 
@@ -118,6 +119,23 @@ The `tray` word is optional; `--device`, `--timeout`, `--interval` and
 writes the login entry. The menu and window controls are described in
 [docs/tray.md](docs/tray.md).
 
+## E-ink terminal theme
+
+A terminal on the panel is easier to read with a light, grayscale color
+scheme: the colors of a normal theme dither into patterns on e-ink and leave
+more ghost behind. The MIT-licensed
+[konsole-eink](https://github.com/asapelkin/konsole-eink) theme by asapelkin
+is recommended for KDE Konsole:
+
+```console
+git clone https://github.com/asapelkin/konsole-eink
+mkdir -p ~/.local/share/konsole
+cp konsole-eink/konsole-eink.colorscheme ~/.local/share/konsole/
+```
+
+Then choose `E-Ink Color Scheme` in Konsole's profile settings. The theme is
+a separate project and is not part of this repository.
+
 ## Documentation
 
 | Document | Contents |
@@ -134,7 +152,7 @@ writes the login entry. The menu and window controls are described in
 
 ## Status
 
-0.1.2, alpha. Monitor control is conservative and verified against the
+0.1.3, alpha. Monitor control is conservative and verified against the
 recorded captures; the ghost estimate is experimental and still needs
 calibration on the panel. See [docs/ghost-estimate.md](docs/ghost-estimate.md)
 for the known limitations.

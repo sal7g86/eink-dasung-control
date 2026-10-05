@@ -46,8 +46,9 @@ Configuration lives in `$XDG_CONFIG_HOME/dasungctl/config.json`
   period in seconds, `max_interval` the cap reached while nothing changes,
   `threshold` the 0-100 level that writes the threshold alert to the log,
   `output` the monitor name substring for X11 (ignored on Wayland), and
-  `width` the model's horizontal resolution (higher costs more CPU per
-  sample).
+  `width` the model's horizontal resolution (higher costs more CPU and
+  memory per sample; see the *Costs* section of
+  [ghost-estimate.md](ghost-estimate.md)).
 - `clear` is deliberately simple. Every area the estimator reports (a
   rectangle in the `Ghost estimate…` preview) is flashed once it has been dirty for
   `delay` seconds; all the areas due at that moment are flashed together in

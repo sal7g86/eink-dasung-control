@@ -8,6 +8,7 @@ import time
 import types
 
 from dasungctl.config import Config
+from dasungctl.errors import SEVERITY_ERROR, SEVERITY_WARN, SEVERITY_WORKING
 from dasungctl.ghostwatch import GhostElement, GhostResult
 from dasungctl.logfile import NullLog
 from dasungctl.protocol import CUSTOM_FRONTLIGHT_MODE, FrontlightMode
@@ -36,7 +37,7 @@ from dasungctl.tray import (
     temperature_level,
     temperature_level_number,
 )
-from dasungctl.transport import TransportError
+from dasungctl.transport import REASON_LOCKED, TransportError
 from dasungctl.tray_windows import _bring_to_current_desktop, _value_text
 
 from fakes import RESPONSES, FakeTransport
@@ -65,6 +66,8 @@ def _controller(transport=None, **kwargs):
         locker=lambda: nullcontext(),
         **kwargs,
     )
+    # The real flow loads the saved preferences before any monitor decision.
+    controller.prefs_loaded = True
     return controller, transport
 
 
@@ -217,7 +220,8 @@ def test_failed_apply_does_not_store_the_last_configuration():
     )
 
     assert controller.apply("contrast", 3) is False
-    assert controller.state.message.startswith("error:")
+    assert controller.state.message == "monitor busy"
+    assert controller.state.severity == SEVERITY_ERROR
 
 
 def test_apply_does_not_rewrite_an_identical_last_configuration(monkeypatch):
@@ -245,7 +249,8 @@ def test_apply_reports_when_the_last_configuration_cannot_be_stored(monkeypatch)
 
     assert controller.apply("contrast", 3) is True
 
-    assert "not saved: disk full" in controller.state.message
+    assert "not saved" in controller.state.message
+    assert controller.state.error_detail == "disk full"
 
 
 def test_soft_and_hard_refresh_consume_the_expected_frames():
@@ -267,6 +272,7 @@ def test_auto_refresh_waits_for_the_interval():
     controller, _transport = _controller(clock=lambda: now[0], interval=100.0)
 
     assert controller.due() is False
+    assert controller.read() is True  # first contact: the monitor is available
     controller.set_autorefresh(True)
     assert controller.state.last_refresh == 100.0
     assert controller.due(199.0) is False
@@ -286,6 +292,7 @@ def test_config_can_make_the_timer_use_the_hard_refresh():
         locker=lambda: nullcontext(),
         clock=lambda: 0.0,
     )
+    assert controller.read() is True
     controller.set_autorefresh(True)
 
     assert controller.tick(1.0) is True
@@ -299,6 +306,7 @@ def test_config_can_make_the_timer_use_the_hard_refresh():
 
 def test_interval_and_autorefresh_messages():
     controller, _transport = _controller()
+    assert controller.read() is True
 
     controller.set_interval(900)
     assert controller.state.interval == 900.0
@@ -316,6 +324,7 @@ def test_auto_refresh_preferences_are_stored(monkeypatch):
         lambda info, prefs=None, **kwargs: saved.append(prefs),
     )
     controller, _transport = _controller()
+    assert controller.read() is True
 
     controller.set_interval(30)
     controller.set_autorefresh(True)
@@ -560,7 +569,9 @@ def test_restore_ignores_an_invalid_last_configuration(monkeypatch):
 
     assert controller.restore() is True
 
-    assert controller.state.message.startswith("last configuration ignored")
+    assert controller.state.message == "saved settings ignored (invalid file)"
+    assert controller.state.severity == SEVERITY_WARN
+    assert controller.state.error_detail == "bad file"
 
 
 def test_restore_reports_transport_failures(monkeypatch):
@@ -591,7 +602,284 @@ def test_transport_failures_become_state_messages():
 
     assert controller.read() is False
     assert "monitor busy" in controller.state.message
+    assert controller.state.severity == SEVERITY_ERROR
     assert controller.apply("contrast", 3) is False
+
+
+class _DeadTransport:
+    """Every exchange fails like a monitor that went away."""
+
+    def exchange(self, request):
+        raise TransportError("incomplete response", reason="no_response")
+
+    def send(self, request):
+        raise TransportError("incomplete response", reason="no_response")
+
+    def receive(self):
+        raise TransportError("incomplete response", reason="no_response")
+
+
+def test_missing_monitor_turns_the_automatic_features_off(monkeypatch):
+    saved = []
+    monkeypatch.setattr(
+        "dasungctl.tray.save_last",
+        lambda info, prefs=None, **kwargs: saved.append(prefs),
+    )
+    controller, _transport = _controller(_DeadTransport())
+    controller.monitor_available = True
+    controller.state.autorefresh = True
+    controller.state.ghost_estimate = True
+
+    assert controller.read() is False
+    assert controller.state.message == "monitor not responding"
+    assert controller.state.error_detail == "no selector answered"
+    # One failed read can be a stall while the panel refreshes: not lost yet.
+    assert controller.monitor_available is True
+    assert controller.state.autorefresh is True
+
+    assert controller.sync() is False
+    assert controller.monitor_available is False
+    assert controller.state.autorefresh is False
+    assert controller.state.ghost_estimate is False
+    assert saved[-1]["autorefresh"] is False
+    assert saved[-1]["ghost_estimate"] is False
+
+
+def test_monitor_return_is_announced_once():
+    controller, _transport = _controller()
+    assert controller.read() is True
+    controller.monitor_available = False
+    controller.state.message = "monitor not responding"
+    controller.state.severity = SEVERITY_ERROR
+
+    assert controller.sync() is False  # the fields match: no external change
+
+    assert controller.monitor_available is True
+    assert controller.state.message == "monitor connected"
+    assert controller.state.severity == ""
+
+
+def test_due_waits_for_a_reachable_monitor():
+    controller, _transport = _controller(interval=5.0)
+    controller.state.autorefresh = True
+    controller.state.last_refresh = 0.0
+
+    controller.monitor_available = False
+    assert controller.due(100.0) is False
+    controller.monitor_available = None
+    assert controller.due(100.0) is False
+    controller.monitor_available = True
+    assert controller.due(100.0) is True
+
+
+def test_panel_off_turns_the_automatic_features_off(monkeypatch):
+    saved = []
+    monkeypatch.setattr(
+        "dasungctl.tray.save_last",
+        lambda info, prefs=None, **kwargs: saved.append(prefs),
+    )
+    controller, _transport = _controller()
+    assert controller.read() is True  # the serial interface stays alive
+    controller.state.autorefresh = True
+    controller.state.ghost_estimate = True
+    controller.set_display_present(True)  # the output was seen before
+
+    controller.set_display_present(False)
+    # One miss can be a display reconfiguration: not off yet.
+    assert controller.monitor_available is True
+    assert controller.state.autorefresh is True
+
+    controller.set_display_present(False)
+    assert controller.monitor_available is False
+    assert controller.state.message == "monitor off (no display output)"
+    assert controller.state.severity == SEVERITY_ERROR
+    assert controller.state.autorefresh is False
+    assert controller.state.ghost_estimate is False
+    assert saved[-1]["autorefresh"] is False
+    assert saved[-1]["ghost_estimate"] is False
+
+    controller.set_display_present(True)
+    assert controller.monitor_available is True
+    assert controller.state.message == "monitor connected"
+    assert controller.state.autorefresh is False  # stays off by design
+
+
+def test_first_display_miss_confirms_when_the_output_was_never_seen(monkeypatch):
+    saved = []
+    monkeypatch.setattr(
+        "dasungctl.tray.save_last",
+        lambda info, prefs=None, **kwargs: saved.append(prefs),
+    )
+    controller, _transport = _controller()
+    controller.state.autorefresh = True
+    controller.state.ghost_estimate = True
+
+    controller.set_display_present(False)  # first verdict: conclusive
+
+    assert controller.display_present is False
+    assert controller.monitor_available is False
+    assert controller.state.autorefresh is False
+    assert controller.state.ghost_estimate is False
+    assert saved[-1]["autorefresh"] is False
+
+
+def test_off_probe_before_prefs_does_not_persist(monkeypatch):
+    stored = []
+    monkeypatch.setattr(
+        "dasungctl.tray.save_last",
+        lambda info, prefs=None, **kwargs: stored.append(prefs),
+    )
+    controller, _transport = _controller()
+    controller.prefs_loaded = False  # the startup probe runs first
+
+    controller.set_display_present(False)
+
+    assert controller.display_present is False
+    assert stored == []
+
+
+def test_restore_stops_the_features_when_the_panel_is_off(monkeypatch):
+    monkeypatch.setattr(
+        "dasungctl.tray.load_last",
+        lambda **kwargs: {
+            "contrast": 6,
+            "autorefresh": True,
+            "autorefresh_interval": 30.0,
+            "ghost_estimate": True,
+        },
+    )
+    stored = []
+    monkeypatch.setattr(
+        "dasungctl.tray.save_last",
+        lambda info, prefs=None, **kwargs: stored.append(prefs),
+    )
+    controller, transport = _controller()
+    controller.prefs_loaded = False
+    controller.set_display_present(False)  # the startup probe
+
+    assert controller.restore() is False
+
+    assert transport.requests == []  # the serial is never opened
+    assert controller.state.info.contrast == 6  # the saved values are kept
+    assert controller.state.autorefresh is False
+    assert controller.state.ghost_estimate is False
+    assert controller.state.message == "monitor off (no display output)"
+    assert stored[-1]["autorefresh"] is False
+
+
+def test_no_serial_while_the_panel_is_off():
+    controller, transport = _controller()
+    controller.set_display_present(False)
+
+    assert controller.read() is False
+    assert controller.sync() is False
+    assert controller.apply("contrast", 3) is False
+    assert controller.refresh() is False
+
+    assert transport.requests == []
+    assert controller.state.message == "monitor off (no display output)"
+
+
+def test_display_probe_unknown_leaves_the_serial_behaviour():
+    controller, _transport = _controller()
+
+    controller.set_display_present(None)
+
+    assert controller.display_present is None
+    assert controller.monitor_available is None
+
+
+def test_automatic_features_refuse_to_start_without_a_monitor(monkeypatch):
+    saved = []
+    monkeypatch.setattr(
+        "dasungctl.tray.save_last",
+        lambda info, prefs=None, **kwargs: saved.append(prefs),
+    )
+    controller, _transport = _controller()
+    controller.monitor_available = False
+    controller.state.ghost_estimate = False
+
+    assert controller.set_autorefresh(True) is False
+    assert controller.state.autorefresh is False
+    assert controller.set_ghost_estimate(True) is False
+    assert controller.state.ghost_estimate is False
+    assert saved == []
+
+
+def test_a_locked_monitor_is_not_a_missing_monitor():
+    def locked_opener():
+        raise TransportError("another dasungctl is running", reason=REASON_LOCKED)
+
+    controller = TrayController(
+        Config(),
+        opener=locked_opener,
+        locker=lambda: nullcontext(),
+    )
+
+    assert controller.read() is False
+    assert "monitor busy" in controller.state.message
+    assert controller.state.severity == SEVERITY_ERROR
+    # The monitor may be fine: another process only holds the lock.
+    assert controller.monitor_available is None
+
+
+def test_startup_without_a_monitor_keeps_the_saved_fields(monkeypatch):
+    monkeypatch.setattr(
+        "dasungctl.tray.load_last",
+        lambda **kwargs: {"mode": 4, "contrast": 6, "speed": 4},
+    )
+    stored = []
+    monkeypatch.setattr(
+        "dasungctl.tray.save_last",
+        lambda info, prefs=None, **kwargs: stored.append(info),
+    )
+    controller, _transport = _controller(_DeadTransport())
+    controller.state.autorefresh = True
+    controller.state.ghost_estimate = True
+
+    assert controller.restore() is False
+    assert controller.state.info.contrast == 6
+
+    assert controller.sync() is False
+    assert controller.state.autorefresh is False
+    assert controller.state.ghost_estimate is False
+    # The prefs-only rewrite keeps the monitor fields it found in the file.
+    assert stored[-1].contrast == 6
+    assert stored[-1].mode == 4
+
+
+def test_startup_without_a_monitor_keeps_the_saved_preferences(monkeypatch):
+    monkeypatch.setattr(
+        "dasungctl.tray.load_last",
+        lambda **kwargs: {
+            "contrast": 6,
+            "autorefresh": False,
+            "autorefresh_interval": 30.0,
+            "ghost_estimate": True,
+            "ghost_clear": {
+                **dict(DEFAULT_CLEAR),
+                "enabled": False,
+                "style": "white-black",
+            },
+        },
+    )
+    stored = []
+    monkeypatch.setattr(
+        "dasungctl.tray.save_last",
+        lambda info, prefs=None, **kwargs: stored.append(prefs),
+    )
+    controller, _transport = _controller(_DeadTransport())
+
+    assert controller.restore() is False
+    # The saved preferences survive the failed session...
+    assert controller.state.interval == 30.0
+    assert controller.state.ghost_clear_settings["style"] == "white-black"
+
+    assert controller.sync() is False
+    assert controller.state.ghost_estimate is False
+    # ...and the off choice is persisted without clobbering them.
+    assert stored[-1]["ghost_clear"]["style"] == "white-black"
+    assert stored[-1]["autorefresh_interval"] == 30.0
 
 
 class _FakeState:
@@ -736,15 +1024,12 @@ def test_nearest_preset_picks_the_closest_entry():
     assert nearest_preset(presets, None) is None
 
 
-def test_status_symbol_classifies_the_last_message():
-    assert status_symbol("error: monitor busy")[1] == "dasung-error"
-    assert status_symbol("Temperature set to 140; custom mode failed: x")[1] == (
-        "dasung-error"
-    )
-    assert status_symbol("working…")[1] == ""
+def test_status_symbol_classifies_the_severity():
+    assert status_symbol("monitor busy", SEVERITY_ERROR)[1] == "dasung-error"
+    assert status_symbol("working…", SEVERITY_WORKING)[1] == ""
     assert status_symbol("reloaded") == (ICON_OK, "dasung-ok")
-    assert status_symbol("last configuration ignored: bad file")[0] == ICON_WARNING
-    assert status_symbol("set to 3 (not saved: disk full)")[0] == ICON_WARNING
+    assert status_symbol("saved settings ignored", SEVERITY_WARN)[0] == ICON_WARNING
+    assert status_symbol("ready", SEVERITY_WARN)[0] == ICON_WARNING
 
 
 def test_gdk_noise_matches_only_the_known_gtk_critical():
@@ -1082,6 +1367,7 @@ def _ghost_app(origin=(3760, 533), elements=(), available=True):
     app = TrayApp.__new__(TrayApp)
     result = GhostResult(
         level=30,
+        light_level=0,
         elements=tuple(elements),
         dirty_fraction=0.1,
         changed_pixels=0,
@@ -1100,15 +1386,17 @@ def _ghost_app(origin=(3760, 533), elements=(), available=True):
     )
     app._clearer = _FakeClearer(available=available)
     app._clear_note = None
+    app._busy = False
     app.log = NullLog()
     app._refresh_ghost_view = lambda: None
     app.GLib = types.SimpleNamespace(timeout_add=lambda delay, callback: None)
     app.controller = types.SimpleNamespace(
+        monitor_available=True,
         state=types.SimpleNamespace(
             ghost_clear=False,
             ghost_clear_settings=dict(DEFAULT_CLEAR),
             ghost_estimate=True,
-        )
+        ),
     )
     app._ghost_window = None
     return app
@@ -1224,12 +1512,128 @@ def test_ghost_tick_honours_the_stopped_estimate():
     assert watcher.samples == 1
 
 
+def test_ghost_tick_stays_paused_without_a_monitor():
+    app = _ghost_app()
+    watcher = _FakeWatcher()
+    app.watcher = watcher
+    app.controller.monitor_available = False
+
+    app._ghost_tick()
+
+    assert watcher.paused is True
+    assert watcher.samples == 0
+
+
+def test_monitor_return_resets_the_estimate():
+    app = _ghost_app()
+    resets = []
+    app.watcher.reset = lambda: resets.append(True)
+    app._last_available = False
+    app.controller.monitor_available = True
+
+    app._watch_availability()
+
+    assert resets == [True]
+    assert app._last_available is True
+
+
+def test_monitor_return_resets_the_capture_too():
+    app = _ghost_app()
+    resets = []
+    app.watcher.reset = lambda: resets.append("model")
+    app.watcher.capturer = types.SimpleNamespace(
+        reset=lambda: resets.append("capture")
+    )
+    app._last_available = False
+    app.controller.monitor_available = True
+
+    app._watch_availability()
+
+    # The capture re-resolves its monitor before the model resets.
+    assert resets == ["capture", "model"]
+
+
+def test_monitor_return_restores_a_pending_configuration():
+    app = _ghost_app()
+    app.watcher.reset = lambda: None
+    calls = []
+    app._run = lambda work, *args, **kwargs: calls.append(work)
+    app.controller.restore_pending = True
+    app.controller.restore = lambda: None
+    app._last_available = False
+    app.controller.monitor_available = True
+
+    app._watch_availability()
+
+    assert calls == [app.controller.restore]
+    assert app._last_available is True
+
+
+def test_monitor_return_does_not_restore_without_a_pending_configuration():
+    app = _ghost_app()
+    app.watcher.reset = lambda: None
+    calls = []
+    app._run = lambda work, *args, **kwargs: calls.append(work)
+    app.controller.restore_pending = False
+    app._last_available = False
+    app.controller.monitor_available = True
+
+    app._watch_availability()
+
+    assert calls == []
+
+
+def test_timer_skips_serial_ops_while_the_panel_is_off():
+    app = _ghost_app()
+    app.controller.display_present = False
+    app.controller.due = lambda: True
+    app.controller.poll_due = lambda: True
+    calls = []
+    app._run = lambda work, *args, **kwargs: calls.append(work)
+    app._check_display_output = lambda: None
+    app._watch_availability = lambda: None
+    app._ghost_tick = lambda: None
+
+    app._on_timer()
+    assert calls == []
+
+    app.controller.display_present = True
+    app._on_timer()
+    assert calls == [app._refresh_action]
+
+
+def test_display_probe_feeds_the_controller(monkeypatch):
+    app = TrayApp.__new__(TrayApp)
+    app.Gdk = object()
+    app._ghost_output = "auto"
+    app._last_output_poll = None
+    app.log = NullLog()
+    recorded = []
+    app.controller = types.SimpleNamespace(
+        panel=types.SimpleNamespace(edid_names=("Paperlike",)),
+        set_display_present=recorded.append,
+    )
+    monkeypatch.setattr(
+        "dasungctl.tray.monitor_output_present", lambda *args: False
+    )
+
+    app._check_display_output()
+    app._check_display_output()  # throttled: the poll cadence has not elapsed
+
+    assert recorded == [False]
+
+
 def test_app_set_ghost_estimate_pauses_the_watcher():
     app = _ghost_app()
     watcher = _FakeWatcher()
     app.watcher = watcher
     recorded = []
-    app.controller.set_ghost_estimate = recorded.append
+
+    def fake_set(running, **_kwargs):
+        recorded.append(running)
+        return True
+
+    app.controller.set_ghost_estimate = fake_set
 
     app.set_ghost_estimate(False)
 

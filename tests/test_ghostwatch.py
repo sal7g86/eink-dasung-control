@@ -60,7 +60,7 @@ def test_first_sample_starts_clean():
     assert result.source_width == 32
 
 
-def test_drawing_dark_content_is_not_a_ghost_yet():
+def test_drawing_dark_content_leaves_a_light_ghost():
     model = make_model()
     model.sample(frame(32, 32), now=100.0, wall=100.0)
 
@@ -69,8 +69,63 @@ def test_drawing_dark_content_is_not_a_ghost_yet():
     )
 
     assert result.changed_pixels == 256
+    assert result.level == 20
+    assert result.light_level == 20
+    assert len(result.elements) == 1
+    element = result.elements[0]
+    assert (element.x, element.y, element.width, element.height) == (0, 0, 16, 16)
+    assert element.dark is False
+    assert element.severity == 20
+    assert result.dirty_fraction == 0.25
+
+
+def test_adjacent_dark_and_light_areas_stay_separate():
+    model = GhostModel(
+        64, 64, 64, 64, columns=8, min_cell_pixels=8, min_cell_fraction=0.0
+    )
+    # Left dark on right light, then the exact inverse: the left half leaves
+    # a dark ghost, the right half a light one, and the two must not merge.
+    model.sample(frame(64, 64, 255, (0, 0, 32, 64, 0)), now=0.0, wall=0.0)
+
+    result = model.sample(
+        frame(64, 64, 0, (0, 0, 32, 64, 255)), now=1.0, wall=1.0
+    )
+
+    assert len(result.elements) == 2
+    left, right = result.elements
+    assert (left.x, left.y, left.width, left.dark) == (0, 0, 32, True)
+    assert (right.x, right.y, right.width, right.dark) == (32, 0, 32, False)
+    assert left.severity == 40
+    assert right.severity == 20
+
+
+def test_small_light_residue_is_not_a_ghost():
+    model = make_model()
+    model.sample(
+        frame(32, 32, 255, (0, 0, 16, 16, 140)), now=0.0, wall=0.0
+    )
+
+    # 140 -> 120 darkens by 20, but the incomplete ink leaves only +2.
+    result = model.sample(
+        frame(32, 32, 255, (0, 0, 16, 16, 120)), now=1.0, wall=1.0
+    )
+
     assert result.level == 0
+    assert result.light_level == 0
     assert result.elements == ()
+
+
+def test_preview_tints_light_residue():
+    model = make_model()
+    model.sample(frame(32, 32), now=0.0, wall=0.0)
+    model.sample(frame(32, 32, 255, (0, 0, 16, 16, 0)), now=1.0, wall=1.0)
+
+    rgb = model.preview_rgb(32, 32)
+
+    inside = rgb[(5 * 32 + 5) * 3 : (5 * 32 + 5) * 3 + 3]
+    outside = rgb[(5 * 32 + 30) * 3 : (5 * 32 + 30) * 3 + 3]
+    assert inside[0] > inside[2]  # a warm tint, not a grey
+    assert tuple(outside) == (235, 235, 235)
 
 
 def test_erased_dark_box_leaves_a_dark_ghost():
@@ -310,6 +365,23 @@ def test_state_round_trip_keeps_labels(tmp_path):
     assert state.elements[0].fullscreen is True
 
 
+def test_state_round_trip_keeps_light_polarity(tmp_path):
+    model = make_model()
+    model.sample(frame(32, 32), now=0.0, wall=0.0)
+    result = model.sample(
+        frame(32, 32, 255, (0, 0, 16, 16, 0)), now=1.0, wall=1.0
+    )
+    path = tmp_path / "ghost.json"
+
+    save_ghost_state(result, path)
+    state = load_ghost_state(path)
+
+    assert state is not None
+    assert len(state.elements) == 1
+    assert state.elements[0].dark is False
+    assert state.elements[0] == result.elements[0]
+
+
 class FakeClock:
     def __init__(self, now=1000.0):
         self.now = now
@@ -437,7 +509,16 @@ def test_watcher_rebuilds_the_model_when_the_size_changes():
 
 def test_watcher_alerts_once_and_rearms_after_the_level_drops():
     clock = FakeClock()
-    watcher = make_watcher(FakeCapturer(ghost_frames()), clock)
+    # A box on ~15% of the panel: erasing it gives a dark level just above
+    # the threshold, drawing over it a light residue just below the re-arm
+    # fraction (60% of the threshold).
+    box = (0, 0, 49, 49, 0)
+    frames = [
+        Frame(frame(128, 128), 128, 128, 128, 128),
+        Frame(frame(128, 128, 255, box), 128, 128, 128, 128),
+        Frame(frame(128, 128), 128, 128, 128, 128),
+    ]
+    watcher = make_watcher(FakeCapturer(frames), clock)
     for _step in range(3):
         watcher.sample()
 
@@ -446,9 +527,10 @@ def test_watcher_alerts_once_and_rearms_after_the_level_drops():
     assert "1 area" in alert
     assert watcher.maybe_alert() is None
 
-    # Rewrite the area and erase it again: the level drops to zero first,
-    # which re-arms the alert.
-    frame_dark = Frame(frame(128, 128, 255, (0, 0, 64, 64, 0)), 128, 128, 128, 128)
+    # Draw dark content over the ghost and erase it again: the light residue
+    # drops the level below the re-arm fraction, so the alert arms itself;
+    # the returning dark ghost is then held back only by the cooldown.
+    frame_dark = Frame(frame(128, 128, 255, box), 128, 128, 128, 128)
     frame_light = Frame(frame(128, 128), 128, 128, 128, 128)
     watcher.capturer = FakeCapturer([frame_dark, frame_light])
     clock.advance(3.0)
@@ -623,6 +705,6 @@ def test_ghost_element_is_frozen():
     element = GhostElement(1, 2, 3, 4, 5, True, 6.0)
     with pytest.raises(Exception):
         element.x = 9
-    result = GhostResult(0, (), 0.0, 0, 0, 0.0, 1, 1, 1, 1)
+    result = GhostResult(0, 0, (), 0.0, 0, 0, 0.0, 1, 1, 1, 1)
     with pytest.raises(Exception):
         result.level = 1

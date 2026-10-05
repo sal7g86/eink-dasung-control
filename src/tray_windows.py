@@ -498,7 +498,9 @@ class ControlsWindow:
                 self.interval.set_active_id(interval_id)
             self._sync_sensitivity(info)
             self._set_text(self.subtitle, self._summary(info))
-            self._set_status(state.message, info)
+            self._set_status(
+                state.message, info, state.severity, state.error_detail
+            )
         finally:
             self._updating = False
 
@@ -553,8 +555,10 @@ class ControlsWindow:
             parts.append(f"frontlight {self.panel.frontlight_label(info.frontlight)}")
         return " · ".join(parts)
 
-    def _set_status(self, message: str, info: MonitorInfo) -> None:
-        """Update the status line and its icon, only when they changed."""
+    def _set_status(
+        self, message: str, info: MonitorInfo, severity: str = "", detail: str = ""
+    ) -> None:
+        """Update the status line, its icon and its tooltip when they changed."""
 
         text = message
         icon = None
@@ -566,9 +570,11 @@ class ControlsWindow:
             else:
                 text = "Ready"
         else:
-            candidates, css = status_symbol(message)
+            candidates, css = status_symbol(message, severity)
             icon = icon_name(self.Gtk, candidates)
         self._set_text(self.status, text)
+        # The short line sits in the window; the exact error stays here.
+        self.status.set_tooltip_text(detail or None)
         for target in (self.status, self.status_icon):
             context = target.get_style_context()
             for css_class in ("dasung-error", "dasung-ok"):
@@ -728,6 +734,10 @@ class GhostWindow:
         frame.get_style_context().add_class("dasung-card")
         self.preview = Gtk.Image()
         self.preview.set_halign(Gtk.Align.CENTER)
+        self.preview.set_tooltip_text(
+            "Ghost-only map: dark residue in grey, light residue in amber; "
+            "the boxes outline the estimated areas"
+        )
         frame.add(self.preview)
         content.pack_start(frame, False, False, 0)
 
@@ -837,6 +847,7 @@ class GhostWindow:
 
         available = watcher is not None and bool(watcher.enabled)
         running = bool(self.app.controller.state.ghost_estimate)
+        monitor_ok = self.app.controller.monitor_available is True
         if not available:
             label = "Start estimate"
             icon = "media-playback-start-symbolic"
@@ -845,6 +856,10 @@ class GhostWindow:
                 if watcher is not None
                 else "The ghost estimate is unavailable"
             )
+        elif not monitor_ok:
+            label = "Start estimate"
+            icon = "media-playback-start-symbolic"
+            tooltip = "The monitor is unavailable; the estimate cannot start"
         elif running:
             label = "Stop estimate"
             icon = "media-playback-pause-symbolic"
@@ -860,7 +875,7 @@ class GhostWindow:
         if self._estimate_icon_name != icon:
             self._estimate_icon_name = icon
             self.estimate_icon.set_from_icon_name(icon, self.Gtk.IconSize.BUTTON)
-        self.estimate_button.set_sensitive(available)
+        self.estimate_button.set_sensitive(available and (running or monitor_ok))
         self.estimate_button.set_tooltip_text(tooltip)
 
     # -- clearing settings editor -----------------------------------------
@@ -1098,6 +1113,7 @@ class GhostWindow:
             watcher.capture_failed,
             getattr(self.app, "_clear_note", None),
             bool(self.app.controller.state.ghost_estimate),
+            self.app.controller.monitor_available,
         )
         if signature == self._signature and self._mapped_once:
             return
@@ -1109,9 +1125,13 @@ class GhostWindow:
             saved = watcher.saved
             if saved is not None:
                 areas = "area" if len(saved.elements) == 1 else "areas"
+                light = sum(
+                    1 for element in saved.elements if not element.dark
+                )
+                kind = f" ({light} light)" if light else ""
                 self._set(
                     self.summary,
-                    f"Last saved: {len(saved.elements)} ghost {areas}, "
+                    f"Last saved: {len(saved.elements)} ghost {areas}{kind}, "
                     f"level {saved.level}/100",
                 )
                 self._set(self.detail, f"saved {saved.saved_at}")
@@ -1124,16 +1144,20 @@ class GhostWindow:
         else:
             count = len(result.elements)
             areas = "area" if count == 1 else "areas"
+            light = sum(1 for element in result.elements if not element.dark)
+            kind = f" ({light} light)" if light else ""
             self._set(
                 self.summary,
-                f"Ghosts: {count} {areas} — level {result.level}/100",
+                f"Ghosts: {count} {areas}{kind} — level {result.level}/100",
             )
             clock = time.strftime("%H:%M:%S", time.localtime(result.sampled_at))
-            self._set(
-                self.detail,
+            detail = (
                 f"sampled {clock} · {result.dirty_fraction * 100:.1f}% of the "
-                f"panel dirty · model {result.model_width}×{result.model_height}",
+                f"panel dirty · model {result.model_width}×{result.model_height}"
             )
+            if result.light_level:
+                detail += f" · light level {result.light_level}/100"
+            self._set(self.detail, detail)
             self._set(self.elements, self._element_text(result.elements))
             self._show_preview(watcher, result)
         self._sync_clear_controls(result)
@@ -1171,6 +1195,8 @@ class GhostWindow:
         elif watcher.error:
             text = watcher.error
             error = True
+        elif self.app.controller.monitor_available is not True:
+            text = "The monitor is unavailable; the estimate is off."
         elif getattr(watcher, "paused", False):
             text = "Estimate stopped — press Start estimate"
         elif getattr(watcher, "zone_error", None):

@@ -1,13 +1,14 @@
 # Ghost estimate
 
 `Ghost estimate…` opens a diagnostic window with an estimate of the ghosts the
-e-ink panel is probably still showing: dark shapes on a neutral background,
-the estimated areas outlined, and a list with each area's application, its
-position in screen pixels, size, severity and age. When the level crosses the
-configured threshold the tray writes one line to its log — no desktop
-notification — and re-arms the alert after a soft/hard refresh or the `Reset
-estimate` button. The preview is deliberately ghost-only: the point is to
-compare where the estimator thinks the ghosts are with the physical panel.
+e-ink panel is probably still showing: the estimated areas outlined over a
+ghost-only map (dark residue in grey, light residue in a warm tint), and a
+list with each area's application, its position in screen pixels, size,
+severity, polarity and age. When the level crosses the configured threshold
+the tray writes one line to its log — no desktop notification — and re-arms
+the alert after a soft/hard refresh or the `Reset estimate` button. The
+preview is deliberately ghost-only: the point is to compare where the
+estimator thinks the ghosts are with the physical panel.
 On X11 the window remains on the workspace where it was opened; choosing it
 again from the tray menu moves it to the workspace in use (on Wayland that
 choice belongs to the compositor).
@@ -19,18 +20,27 @@ confirm a real ghost.
 ## How it works
 
 It watches the captured screen, updates a low-resolution model of the panel
-only where the content changed, and remembers old dark ink that was not fully
-erased; a dark pixel that is merely lighter than intended is not counted. It
-sees only what happened while the tray was running, and the monitor's
-physical `C` button is invisible to it: press `Reset estimate` after using
-it. The `Retry capture` button recovers after a refused screen share.
+only where the content changed, and remembers old ink that was not fully
+rewritten: a dark residue where light content replaced dark content, and a
+light residue where dark content replaced light content. Light areas also
+cover dark ink that has just been drawn and is not fully saturated, so a
+freshly opened dark window can show light areas until those pixels are
+rewritten. It sees only what happened while the tray was running, and the
+monitor's physical `C` button is invisible to it: press `Reset estimate`
+after using it. The `Retry capture` button recovers after a refused screen
+share.
 
 The header's `Stop estimate` button pauses the sampling — and with it the
 automatic clearing, which runs after a fresh sample — while the last result
 stays on screen; `Start estimate` resumes both, and the choice is remembered
 across tray restarts like the other switches. `ghost.enabled` in the
 configuration remains the master switch that can disable the feature
-entirely.
+entirely. A missing monitor turns the estimate off too (the tray saves the
+choice): this includes a panel that is switched off, detected from the e-ink
+display output because the serial interface keeps answering; the window says
+`The monitor is unavailable`, `Start estimate` stays disabled until it
+answers, and the model and the capture's monitor are reset when it returns,
+because the panel refreshed while it was off.
 
 Each area carries the application class that was over it when the ghost
 formed (`konsole (fullscreen)`, `firefox`), so the list answers "which window
@@ -46,6 +56,48 @@ While nothing changes the sampling interval doubles from `interval` up to
 `max_interval`, so an idle screen costs almost nothing; the first change, and
 an open `Ghost estimate…` window, return to the base cadence. The threshold line
 in the log can therefore be delayed up to `max_interval` after a change.
+
+## The model
+
+For each pixel the estimator keeps three values: `S`, the current screen
+content; `A`, what the panel is estimated to show; and the signed ghost error
+`E = A - S` (negative: darker than the content, positive: lighter).
+
+One sample walks the captured frame and, only where the content changed by
+more than `noise` (10 levels out of 255), moves `A` toward `S` by an
+efficiency `gamma` that depends on the direction: `gamma_ink` (90) when the
+pixel darkens, `gamma_erase` (80) when it lightens. The update never reaches
+`S` exactly, so part of `E` remains and stays there — untouched pixels keep
+their error — until the area is rewritten or the estimate is reset. `noise`,
+`min_error`, `gamma_ink` and `gamma_erase` are model assumptions, not user
+settings.
+
+`E` is classified by polarity and magnitude. A dark ghost is `E <= -min_error`
+(8) on content at or above 128: old dark ink still visible on light content.
+A light ghost is `E >= min_error` on content below 128: old light content
+still visible on dark content, plus dark ink that has just been written and
+is not fully saturated. The content gates partition the pixels, so a pixel
+counts for at most one polarity.
+
+The model groups pixels into square cells (16 columns; the rows follow the
+aspect ratio). A cell is dirty for a polarity when at least
+`max(24 model pixels, 5% of its area)` carry that polarity with an error over
+`min_error`; dirty cells of the same polarity are joined by 8-connectivity
+into the areas shown in the window, so a dark area and a light halo touching
+it remain two elements. Each area reports its bounding box in screen pixels,
+its severity (100 when its counted pixels are off by 128 levels on average),
+its age (since the cell first became dirty) and the application recorded at
+that moment, which is why a label survives the window closing.
+
+The window's `level` is the total absolute error over the whole model, 100
+when every model pixel is off by 32 levels; `light_level` is the part
+contributed by light ghosts. The preview maps the errors to a ghost-only
+image: negative on light content as darker grey, positive on dark content as
+a warm tint (a light residue lighter than the preview's background could not
+be seen on its own), with the faint cell grid and each area outlined in its
+polarity's colour. The panel is never read back: only a photo can confirm a
+real ghost. `Reset estimate` models a full panel refresh; a zone flash resets
+the estimate over the flashed rectangle at cell granularity.
 
 ## Zone clearing
 
@@ -94,23 +146,56 @@ automatic detection reads the monitors' EDID model names through
 matches them against the active panel profile's `edid_names`; `ghost.output`
 selects the monitor when that fails, by model or by output name (`DP-1`).
 
+## Costs
+
+The estimate runs inside the tray process, on the GTK main loop, in plain
+Python: there is no worker thread and no helper process, and it never opens
+the serial port. A timer wakes the tray once per second and asks the watcher
+whether a sample is due; `ghost.interval` (2 s) is the base cadence, a sample
+with no changed pixels doubles the wait up to `ghost.max_interval` (30 s),
+and the first change and an open `Ghost estimate…` window return to the base
+cadence. An idle screen therefore costs almost nothing between samples, at
+the price of a threshold alert late by up to `max_interval`.
+
+Each due sample captures the monitor and updates the model. Indicative
+measurements on the maintainer's machine (Python 3.13, a 2200×1650 monitor at
+the default `width` 480):
+
+| Step | Cost |
+| --- | --- |
+| frame capture and reduction | backend-dependent; on Wayland the conversion is done by GStreamer, on X11 by GDK plus a Python grey pass |
+| X11 grey conversion, 480×360 RGBA | about 16 ms |
+| model update, 480×360 | 13 ms with ~10% of the pixels changed, 32 ms on a whole-frame change, 0.15 ms on an identical frame |
+| model update, 1200×900 (`ghost.width` 1200) | 84 ms, up to 198 ms on a whole-frame change |
+| preview, 300 px wide | about 9 ms, only while the `Ghost estimate…` window is open |
+| model memory | about 8 bytes per model pixel: ~1.4 MB at 480×360, ~8.6 MB at 1200×900 |
+
+These are reference measurements, not guarantees. The capture backend shapes
+the cost too: on Wayland the ScreenCast pipeline stays open between samples
+and keeps converting and scaling while the shared monitor changes, even when
+no sample is due; on X11 every sample copies the monitor region out of the X
+server. The window labels are queried at most every 3 s while sampling (EWMH
+on X11; on KDE Wayland the tray loads, starts and unloads a small script in
+the compositor and waits on a nested main loop). Everything shares the tray's
+single GTK thread, so a sample runs between two interface updates: the
+defaults stay in the low tens of milliseconds, but a large `ghost.width`
+makes a sample tens to hundreds of milliseconds and a visible hitch.
+
 ## Known limitations
 
-- The model counts only dark ghosts (old dark content on current light
-  content); `E = A - S` positive errors are imperfect ink, not counted.
-  `noise`, `min_error`, `gamma_ink`, `gamma_erase` and the alert `threshold`
-  are assumptions, not yet configurable: compare the estimate with the panel
+- Both polarities are estimated: dark residue on light content and light
+  residue on dark content. Light areas also cover dark ink that was just
+  drawn and is not fully saturated, so they must be judged on the panel;
+  `noise`, `min_error`, `gamma_ink` and `gamma_erase` are assumptions, not
+  yet configurable (`threshold` is). Compare the estimate with the panel
   over a few sessions and tune them.
 - On KDE Wayland a combined run once produced an element without its
-  application label. The suspected cause is two `KWinZones` instances
-  registering the same D-Bus object in one process; it is still to be
-  re-tested, and the X11 provider is unaffected.
+  application label. The tray now builds a single provider instance per
+  process (`open_zones()` is called once), so the suspected double D-Bus
+  registration cannot happen; the visual re-test is still pending, and the
+  X11 provider is unaffected.
 - The restore-token reuse on Wayland was verified once (the dialog did not
   reappear), but a second silent start is still to be confirmed.
-- The clearing overlay is not fully click-through: `ZoneFlasher._pass_through`
-  calls PyGObject's `input_shape_combine_region` with the wrong signature and
-  the exception is swallowed, so the overlay blocks the mouse for the
-  duration of a flash (about 0.6 s). Fix and verify with `Test flash`.
 
 ## Implementation notes
 
@@ -152,9 +237,9 @@ These are the non-obvious points future changes must keep in mind.
 - The KWin script lives in `$XDG_RUNTIME_DIR/dasungctl-zones.js`, plugin name
   `dasungzones`; the report comes back through `callDBus` to
   `org.dasungctl.Zones`.
-- The model counts only dark ghosts; a cell is dirty above
-  `max(24 model px, 5% of its area)` with `|E| >= 8`; the label is recorded
-  when the cell first becomes dirty and kept while it stays dirty.
+- *The model* section above describes the formulas; keep it in sync with
+  `ghostwatch.py`. Components are built per polarity, and the label is
+  recorded when a cell first becomes dirty and kept while it stays dirty.
 - Sampling backs off by doubling up to `max_interval` while samples show no
   changes; `set_force_base(True)` (the open window) restores the base rate.
 - With a static screen, frames differ only by capture jitter below the

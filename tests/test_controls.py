@@ -2,6 +2,7 @@
 
 from dasungctl import controls
 from dasungctl.client import DasungClient, MonitorInfo
+from dasungctl.errors import KIND_CONNECTION, SEVERITY_ERROR
 from dasungctl.protocol import CUSTOM_FRONTLIGHT_MODE
 from dasungctl.transport import TransportError
 
@@ -117,7 +118,9 @@ def test_apply_field_validates_plain_field_ranges():
     assert not controls.apply_field(DasungClient(transport), state, "contrast", 99)
 
     assert state.info.contrast == 6
-    assert state.message.startswith("error:")
+    assert state.severity == SEVERITY_ERROR
+    assert "contrast must be" in state.message
+    assert state.error_detail
 
 
 def test_apply_field_mode_reports_the_name():
@@ -138,5 +141,7 @@ def test_write_errors_are_reported_without_raising():
     )
 
     assert applied is False
-    assert state.message.startswith("error:")
+    assert state.severity == SEVERITY_ERROR
+    assert state.error_kind == KIND_CONNECTION
+    assert state.error_detail == "no answer"
     assert state.info.temperature == 0
