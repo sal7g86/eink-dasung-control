@@ -75,6 +75,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="write ~/.config/autostart/dasungctl-tray.desktop and exit",
     )
+    tray.add_argument(
+        "--install-launcher",
+        action="store_true",
+        help="write the ~/.local/bin/dasungctl launcher and exit",
+    )
     devices = commands.add_parser(
         "devices", help="list serial devices without opening them"
     )
@@ -164,6 +169,8 @@ def _tray_arguments(args: argparse.Namespace) -> list[str]:
         argv += ["--interval", str(args.interval)]
     if getattr(args, "install_autostart", False):
         argv += ["--install-autostart"]
+    if getattr(args, "install_launcher", False):
+        argv += ["--install-launcher"]
     return argv
 
 
@@ -180,6 +187,7 @@ def _run_tray(args: argparse.Namespace, log=None) -> int:
             timeout=args.timeout,
             interval=args.interval,
             install_autostart=getattr(args, "install_autostart", False),
+            install_launcher=getattr(args, "install_launcher", False),
             log=log,
         )
     except TrayDependencyError as exc:

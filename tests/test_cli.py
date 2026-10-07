@@ -65,12 +65,25 @@ def test_tray_options_are_forwarded(monkeypatch):
             "60",
             "tray",
             "--install-autostart",
+            "--install-launcher",
         ]
     ) == 0
     assert calls[0]["device"] == "/dev/test-monitor"
     assert calls[0]["timeout"] == 2.5
     assert calls[0]["interval"] == 60
     assert calls[0]["install_autostart"] is True
+    assert calls[0]["install_launcher"] is True
+
+
+def test_tray_arguments_forward_the_install_flags():
+    args = cli.build_parser().parse_args(
+        ["tray", "--install-autostart", "--install-launcher"]
+    )
+
+    argv = cli._tray_arguments(args)
+
+    assert "--install-autostart" in argv
+    assert "--install-launcher" in argv
 
 
 def test_tray_without_gtk_reexecutes_the_system_python(monkeypatch, capsys):

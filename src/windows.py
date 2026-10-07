@@ -8,7 +8,9 @@ calls back over D-Bus (the same route tools like kdotool use). Both return
 global logical rectangles, converted here to monitor-relative zones.
 
 Everything is best-effort: a missing library or a refused channel simply
-means no labels, never a failed tray.
+means no labels, never a failed tray. A provider that cannot read the list
+raises ZoneUnavailable with the real cause; the ghost watcher catches it and
+reports it in the estimate window's status line.
 """
 
 from __future__ import annotations
@@ -228,6 +230,21 @@ callDBus("org.dasungctl.Zones", "/zones", "org.dasungctl.Zones", "Report",
          JSON.stringify(data));
 """
 
+# Moving a window between virtual desktops has no Wayland client API; the
+# same scripting route runs this short action. The tray sets the program name
+# to `dasungctl`, which is the resource class GTK windows get on Wayland.
+KWIN_MOVE_SCRIPT = """\
+var current = workspace.currentDesktop;
+var list = workspace.stackingOrder ? workspace.stackingOrder : workspace.windowList();
+for (var i = 0; i < list.length; i++) {
+    var w = list[i];
+    if (String(w.resourceClass || "") !== "dasungctl") { continue; }
+    try {
+        w.desktops = [current];
+    } catch (e) {}
+}
+"""
+
 KWIN_INTERFACE_XML = """\
 <node>
   <interface name="org.dasungctl.Zones">
@@ -263,6 +280,7 @@ class KWinZones:
         self._registered = False
         self._report: dict = {}
         self._failed_at: float | None = None
+        self._last_error: str | None = None
 
     def _ensure(self) -> None:
         import gi
@@ -301,45 +319,71 @@ class KWinZones:
             self._report["json"] = params.unpack()[0]
             invocation.return_value(None)
 
-    def _write_script(self) -> None:
+    def _write_script(self, script: str) -> None:
         try:
             current = self._script_path.read_text(encoding="utf-8")
         except OSError:
             current = None
-        if current != KWIN_SCRIPT:
-            self._script_path.write_text(KWIN_SCRIPT, encoding="utf-8")
+        if current != script:
+            self._script_path.write_text(script, encoding="utf-8")
 
-    def _query(self) -> list:
-        """Load the script, wait for its report and unload it again."""
-
-        self._ensure()
-        Gio, GLib = self._gio, self._glib
-        self._report.clear()
-        self._write_script()
-        scripting = (
+    @staticmethod
+    def _scripting():
+        return (
             "org.kde.KWin",
             "/Scripting",
             "org.kde.kwin.Scripting",
         )
+
+    def _load_and_start(self, script: str) -> None:
+        """Write one script into the runtime dir and start it in KWin."""
+
+        self._ensure()
+        Gio, GLib = self._gio, self._glib
+        self._write_script(script)
+        scripting = self._scripting()
+        self._bus.call_sync(
+            *scripting,
+            "loadScript",
+            GLib.Variant("(ss)", (str(self._script_path), self.PLUGIN)),
+            GLib.VariantType.new("(i)"),
+            Gio.DBusCallFlags.NONE,
+            3000,
+            None,
+        )
+        self._bus.call_sync(
+            *scripting,
+            "start",
+            None,
+            None,
+            Gio.DBusCallFlags.NONE,
+            3000,
+            None,
+        )
+
+    def _unload(self) -> None:
+        """Unload our script; a compositor without it is not an error."""
+
         try:
             self._bus.call_sync(
-                *scripting,
-                "loadScript",
-                GLib.Variant("(ss)", (str(self._script_path), self.PLUGIN)),
-                GLib.VariantType.new("(i)"),
-                Gio.DBusCallFlags.NONE,
-                3000,
+                *self._scripting(),
+                "unloadScript",
+                self._glib.Variant("(s)", (self.PLUGIN,)),
+                None,
+                self._gio.DBusCallFlags.NONE,
+                2000,
                 None,
             )
-            self._bus.call_sync(
-                *scripting,
-                "start",
-                None,
-                None,
-                Gio.DBusCallFlags.NONE,
-                3000,
-                None,
-            )
+        except Exception:
+            pass
+
+    def _query(self) -> list:
+        """Load the script, wait for its report and unload it again."""
+
+        self._report.clear()
+        try:
+            self._load_and_start(KWIN_SCRIPT)
+            GLib = self._glib
             loop = GLib.MainLoop()
 
             def check():
@@ -357,38 +401,53 @@ class KWinZones:
             if "json" not in self._report:
                 loop.run()
         finally:
-            try:
-                self._bus.call_sync(
-                    *scripting,
-                    "unloadScript",
-                    GLib.Variant("(s)", (self.PLUGIN,)),
-                    None,
-                    Gio.DBusCallFlags.NONE,
-                    2000,
-                    None,
-                )
-            except Exception:
-                pass
+            self._unload()
         text = self._report.get("json")
         if text is None:
             raise ZoneUnavailable("KWin did not answer the window query")
         data = json.loads(text)
         return data if isinstance(data, list) else []
 
+    def move_to_current_desktop(self) -> bool:
+        """Move this application's windows to the active desktop (KWin).
+
+        Wayland gives applications no API for this, so the same scripting
+        route as the window list runs a short action in the compositor,
+        matching the resource class the tray set through its program name.
+        Best-effort: False when the action could not be started.
+        """
+
+        try:
+            self._load_and_start(KWIN_MOVE_SCRIPT)
+        except Exception:
+            return False
+        finally:
+            self._unload()
+        return True
+
     def zones(
         self, origin_x: int, origin_y: int, width: int, height: int
     ) -> tuple[Zone, ...]:
-        """Window zones from KWin; empty while the plugin is unavailable."""
+        """Window zones from KWin, or ZoneUnavailable with the real cause.
+
+        The failure is not swallowed: the ghost watcher catches it and shows
+        it in the estimate window, so a broken label channel is visible
+        instead of silently leaving every area unlabelled.
+        """
 
         now = time.monotonic()
         if self._failed_at is not None and now - self._failed_at < self.RETRY_SECONDS:
-            return ()
+            raise ZoneUnavailable(
+                self._last_error or "the window list is unavailable"
+            )
         try:
             windows = self._query()
-        except Exception:
+        except Exception as exc:
             self._failed_at = now
-            return ()
+            self._last_error = f"the KWin window query failed: {exc}"
+            raise ZoneUnavailable(self._last_error) from exc
         self._failed_at = None
+        self._last_error = None
         return to_monitor_zones(windows, origin_x, origin_y, width, height)
 
 

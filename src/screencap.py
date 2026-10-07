@@ -142,6 +142,79 @@ def edid_monitor_name(edid: bytes) -> str | None:
     return None
 
 
+# DRM connector entries; readable without the compositor, used on Wayland
+# where Gdk does not expose the outputs' EDID names.
+DRM_DIR = Path("/sys/class/drm")
+
+
+def drm_output_names(root: Path | None = None) -> dict[str, str | None]:
+    """Connected DRM outputs as name -> EDID model name (None when absent).
+
+    Names drop the `cardN-` prefix so they read like the compositor's output
+    names (`DP-1`, `HDMI-A-3`). Disconnected connectors are skipped: the
+    panel's receiver disappears when it is switched off, which is exactly the
+    signal the availability check needs.
+    """
+
+    base = Path(root) if root is not None else DRM_DIR
+    try:
+        entries = sorted(base.glob("card*-*"))
+    except OSError:  # pragma: no cover - depends on the host
+        return {}
+    outputs: dict[str, str | None] = {}
+    for entry in entries:
+        if not entry.is_dir():
+            continue
+        try:
+            status = (entry / "status").read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if status != "connected":
+            continue
+        name = entry.name.split("-", 1)[1] if "-" in entry.name else entry.name
+        model: str | None = None
+        try:
+            edid = (entry / "edid").read_bytes()
+        except OSError:
+            edid = b""
+        if edid:
+            model = edid_monitor_name(edid)
+        outputs[name] = model
+    return outputs
+
+
+def drm_output_present(
+    wanted: str = "auto", panel_names=None, root: Path | None = None
+) -> bool | None:
+    """Whether a connected DRM output is the e-ink panel (Wayland check).
+
+    Matching is the capture's: the EDID model names of the active panel
+    profile (`auto`) or the configured `ghost.output` substring, against the
+    output name or its EDID model. Returns None when the check cannot tell
+    (no readable DRM entries, or `auto` without any EDID name), so the caller
+    keeps the serial-only behaviour; it never falls back to "the only
+    monitor", which would mistake the desktop screen for the panel.
+    """
+
+    outputs = drm_output_names(root)
+    if not outputs:
+        return None
+    if wanted in (None, "", "auto"):
+        needles = tuple(panel_names) if panel_names else ("paperlike",)
+        if not any(model for model in outputs.values()):
+            return None
+    else:
+        needles = (wanted,)
+    needles = tuple(
+        str(needle).strip().lower() for needle in needles if str(needle).strip()
+    )
+    for name, model in outputs.items():
+        for candidate in (name, model or ""):
+            if any(needle in candidate.lower() for needle in needles):
+                return True
+    return False
+
+
 def x11_edid_monitor_names() -> dict[tuple[int, int, int, int], str]:
     """EDID monitor names by RandR output geometry (best effort).
 
@@ -216,21 +289,23 @@ def x11_monitor_aliases(monitors) -> list[tuple[str, ...]]:
 def monitor_output_present(
     gdk, wanted: str = "auto", panel_names=None
 ) -> bool | None:
-    """Whether the e-ink display output is currently present (X11).
+    """Whether the e-ink display output is currently present.
 
     The panel's HDMI receiver disappears when it is switched off, while the
     CH340 stays powered and its serial selectors keep answering the stored
     values: the output is the confirmed signal that tells "panel off" from
-    "panel on". The matching is the capture's: the EDID model names of the
-    panel profiles (through python-xlib) and the configured `ghost.output`.
-    Returns None when the check cannot tell (Wayland, no display, or `auto`
-    without EDID names), so the caller keeps the serial-only behaviour; it
-    never falls back to "the only monitor", which would mistake the desktop
-    screen for the panel.
+    "panel on". On X11 the matching runs over the Gdk monitors and their EDID
+    names (through python-xlib); on Wayland over the DRM sysfs entries of the
+    connected outputs, which carry the same EDID model names. The matching is
+    the capture's: the EDID model names of the panel profiles and the
+    configured `ghost.output`. Returns None when the check cannot tell (no
+    display, no readable DRM data, or `auto` without EDID names), so the
+    caller keeps the serial-only behaviour; it never falls back to "the only
+    monitor", which would mistake the desktop screen for the panel.
     """
 
     if os.environ.get("WAYLAND_DISPLAY"):
-        return None
+        return drm_output_present(wanted, panel_names)
     display = gdk.Display.get_default()
     if display is None:
         return None

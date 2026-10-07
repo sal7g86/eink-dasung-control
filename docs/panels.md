@@ -39,7 +39,7 @@ analysis behind the labels is in
 | --- | --- | --- |
 | `key` | name used by the `panel` config key and by `doctor` | — |
 | `name`, `protocol`, `refresh_hz` | model identity and the protocol version to expect | `dasungctl doctor`, EDID |
-| `edid_names` | substrings of the monitor name used by the X11 capture auto-detect | `xrandr --props`, `doctor` |
+| `edid_names` | substrings of the monitor name used by the auto-detect (X11 capture, DRM presence check on Wayland) | `xrandr --props`, `doctor` |
 | `modes` | display-mode value → name | physical `M` button calibration |
 | `speed_labels` | speed value 1..N → label | official-client combo, confirmed on the panel when possible |
 | `frontlight_levels` | brightness byte → label | physical lamp-button calibration |

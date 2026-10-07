@@ -8,16 +8,20 @@ route the removed 2026-09-26 zone mode used; its physical efficacy was never
 established, so the feature stays opt-in and every result must be judged on
 the panel.
 
-X11 only: on Wayland a window cannot be placed at global screen coordinates,
-so the tray disables the feature there.
+On X11 the overlay is an override-redirect window placed at global screen
+coordinates. On Wayland a plain window cannot be placed there, so the overlay
+is a layer-shell surface anchored to the captured output (KDE and wlroots
+compositors; GNOME does not expose layer-shell to applications). When neither
+route is available the feature reports itself unavailable.
 
-The selection policy and the flash sequence are pure and testable; only
-``ZoneFlasher`` needs GTK.
+The selection policy and the flash sequence are pure and testable; only the
+flasher classes need GTK.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, fields
+import os
 from typing import Sequence
 
 from .ghostwatch import GhostElement
@@ -162,7 +166,7 @@ def due_clear_elements(
 
 
 class ZoneFlasher:
-    """Borderless overlays that flash global screen rectangles together.
+    """Borderless X11 overlays that flash global screen rectangles together.
 
     One undecorated, click-through window per rectangle, all sharing the
     same phase timer, so a wave of areas lights up and goes dark at the
@@ -176,9 +180,10 @@ class ZoneFlasher:
 
     MAP_TIMEOUT_MS = 1000
     MAP_SETTLE_MS = 40
+    unavailable_note = "local clearing needs X11"
 
     def __init__(self, gtk: dict, *, available: bool) -> None:
-        """Store the GTK modules; `available` is False on Wayland."""
+        """Store the GTK modules; `available` is False without a placement."""
 
         self.Gtk = gtk["Gtk"]
         self.Gdk = gtk["Gdk"]
@@ -190,13 +195,47 @@ class ZoneFlasher:
         self._pending_phase: tuple[int, int] | None = None
         self._map_timeout = None
         self._on_done = None
+        # Current phase colour; the Wayland overlays paint it themselves.
+        self._color: int | None = None
         self.busy = False
 
     @property
     def available(self) -> bool:
-        """True when an overlay can be placed (X11 only)."""
+        """True when an overlay can be placed in this session."""
 
         return self._available
+
+    def _build_windows(self, boxes) -> list:
+        """One overlay window per rectangle, placed at global coordinates.
+
+        X11 route: an override-redirect window skips the window manager and
+        maps without the desktop's map animation, which would otherwise hide
+        most of the first phase behind a fade-in.
+        """
+
+        Gtk = self.Gtk
+        windows = []
+        for x, y, width, height in boxes:
+            window = Gtk.Window(type=Gtk.WindowType.TOPLEVEL)
+            window.set_decorated(False)
+            window.set_skip_taskbar_hint(True)
+            window.set_skip_pager_hint(True)
+            window.set_keep_above(True)
+            window.set_accept_focus(False)
+            window.set_focus_on_map(False)
+            window.set_default_size(width, height)
+            window.move(x, y)
+            window.set_wmclass("dasungctl-clear", "Dasungctl-clear")
+            window.connect("delete-event", lambda *_args: True)
+            try:
+                window.realize()
+                gdk_window = window.get_window()
+                if gdk_window is not None:
+                    gdk_window.set_override_redirect(True)
+            except Exception:  # pragma: no cover - not available everywhere
+                pass
+            windows.append(window)
+        return windows
 
     def flash(self, rects, phases, on_done) -> bool:
         """Start one flash over a sequence of global rectangles.
@@ -219,34 +258,11 @@ class ZoneFlasher:
         color, ms = phases[0]
         if color is None:
             return False
-        Gtk = self.Gtk
-        windows = []
-        for x, y, width, height in boxes:
-            window = Gtk.Window(type=Gtk.WindowType.TOPLEVEL)
-            window.set_decorated(False)
-            window.set_skip_taskbar_hint(True)
-            window.set_skip_pager_hint(True)
-            window.set_keep_above(True)
-            window.set_accept_focus(False)
-            window.set_focus_on_map(False)
-            window.set_default_size(width, height)
-            window.move(x, y)
-            window.set_wmclass("dasungctl-clear", "Dasungctl-clear")
-            window.connect("delete-event", lambda *_args: True)
-            if not windows:
-                # One map event is enough to start the shared phase timer.
-                window.connect("map-event", self._on_map_event)
-            # An override-redirect window skips the window manager: it maps
-            # without the desktop's map animation, which would otherwise
-            # hide most of the first phase behind a fade-in.
-            try:
-                window.realize()
-                gdk_window = window.get_window()
-                if gdk_window is not None:
-                    gdk_window.set_override_redirect(True)
-            except Exception:  # pragma: no cover - not available everywhere
-                pass
-            windows.append(window)
+        windows = self._build_windows(boxes)
+        if not windows:
+            return False
+        # One map event is enough to start the shared phase timer.
+        windows[0].connect("map-event", self._on_map_event)
         self._windows = windows
         self._phases = phases
         self._index = 1
@@ -284,12 +300,16 @@ class ZoneFlasher:
         return False
 
     def _apply_color(self, color: int) -> None:
+        self._color = int(color)
         rgba = self.Gdk.RGBA()
         rgba.parse(f"#{color:02x}{color:02x}{color:02x}")
         for window in self._windows:
             window.override_background_color(
                 self.Gtk.StateFlags.NORMAL, rgba
             )
+            # Wayland draws the overlay through the child that paints the
+            # phase colour, so a redraw is queued on every phase change.
+            window.queue_draw()
 
     def _pass_through(self, window) -> None:
         """Empty the overlay's input shape so clicks reach the desktop.
@@ -358,3 +378,110 @@ class ZoneFlasher:
         for window in windows:
             window.destroy()
         self.busy = False
+
+
+def load_layer_shell():
+    """The GtkLayerShell bindings, or None when they are missing."""
+
+    try:
+        import gi
+
+        gi.require_version("GtkLayerShell", "0.1")
+        from gi.repository import GtkLayerShell
+    except Exception:  # pragma: no cover - depends on the host
+        return None
+    return GtkLayerShell
+
+
+class WaylandZoneFlasher(ZoneFlasher):
+    """Layer-shell overlays placed at global logical coordinates.
+
+    A plain Wayland window cannot be placed where the application wants, so
+    each overlay is a layer-shell surface on the overlay layer, anchored to
+    the top-left of the output under its rectangle and offset with margins:
+    the tray's rectangle coordinates are global logicals, the same space the
+    ScreenCast portal and KWin report. The surface is click-through (empty
+    input region and no keyboard interactivity). Availability depends on the
+    compositor exposing layer-shell to applications; GNOME does not.
+    """
+
+    def __init__(self, gtk: dict, layer_shell=None) -> None:
+        """Use `layer_shell` for tests; import the bindings by default."""
+
+        module = layer_shell if layer_shell is not None else load_layer_shell()
+        supported = False
+        if module is not None:
+            try:
+                supported = bool(module.is_supported())
+            except Exception:  # pragma: no cover - defensive
+                supported = False
+        super().__init__(gtk, available=supported)
+        self._layer_shell = module
+        self.unavailable_note = "local clearing needs layer-shell support"
+        if module is None:
+            self.unavailable_note = (
+                "local clearing needs the gtk-layer-shell package"
+            )
+
+    def _build_windows(self, boxes) -> list:
+        """One layer-shell surface per rectangle, on the output below it.
+
+        A bare Gtk.Window never attaches a buffer on a layer surface (the
+        overlay stays invisible), so every overlay carries a DrawingArea
+        that paints the current phase colour itself.
+        """
+
+        Gtk = self.Gtk
+        Shell = self._layer_shell
+        display = self.Gdk.Display.get_default()
+        windows = []
+        for x, y, width, height in boxes:
+            window = Gtk.Window(type=Gtk.WindowType.TOPLEVEL)
+            area = Gtk.DrawingArea()
+            area.set_size_request(width, height)
+            area.connect("draw", self._draw_area)
+            window.add(area)
+            Shell.init_for_window(window)
+            Shell.set_namespace(window, "dasungctl-clear")
+            Shell.set_layer(window, Shell.Layer.OVERLAY)
+            Shell.set_keyboard_mode(window, Shell.KeyboardMode.NONE)
+            Shell.set_anchor(window, Shell.Edge.TOP, True)
+            Shell.set_anchor(window, Shell.Edge.LEFT, True)
+            monitor = None
+            if display is not None:
+                monitor = display.get_monitor_at_point(
+                    x + width // 2, y + height // 2
+                )
+            if monitor is not None:
+                Shell.set_monitor(window, monitor)
+                geometry = monitor.get_geometry()
+                left = int(x) - int(geometry.x)
+                top = int(y) - int(geometry.y)
+            else:  # pragma: no cover - no display means no flash anyway
+                left, top = int(x), int(y)
+            Shell.set_margin(window, Shell.Edge.LEFT, max(0, left))
+            Shell.set_margin(window, Shell.Edge.TOP, max(0, top))
+            window.set_default_size(width, height)
+            windows.append(window)
+        return windows
+
+    def _draw_area(self, _widget, cr) -> bool:
+        """Paint the phase colour; black before the first phase is set."""
+
+        color = 0 if self._color is None else self._color
+        cr.set_source_rgb(color / 255, color / 255, color / 255)
+        cr.paint()
+        return False
+
+
+def open_flasher(gtk: dict):
+    """The overlay flasher this session can use.
+
+    Wayland places the overlays through layer-shell; X11 uses the
+    override-redirect window. An unsupported route still returns a flasher,
+    which reports itself unavailable with a reason.
+    """
+
+    if os.environ.get("WAYLAND_DISPLAY"):
+        return WaylandZoneFlasher(gtk)
+    return ZoneFlasher(gtk, available=True)

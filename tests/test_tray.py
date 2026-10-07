@@ -26,16 +26,21 @@ from dasungctl.tray import (
     TrayApp,
     TrayController,
     _install_signal_handlers,
+    appindicator_noise,
     autostart_entry,
     autostart_path,
     frontlight_label,
     gdk_noise,
+    install_appindicator_log_filter,
     install_gdk_log_filter,
+    launcher_path,
+    launcher_script,
     nearest_preset,
     status_symbol,
     temperature_byte,
     temperature_level,
     temperature_level_number,
+    write_launcher,
 )
 from dasungctl.transport import REASON_LOCKED, TransportError
 from dasungctl.tray_windows import _bring_to_current_desktop, _value_text
@@ -1048,6 +1053,7 @@ class _FakeGLib:
 
     class LogLevelFlags:
         LEVEL_CRITICAL = 8
+        LEVEL_WARNING = 16
 
     def __init__(self):
         self.handler = None
@@ -1081,6 +1087,38 @@ def test_gdk_log_filter_drops_only_the_known_message():
     glib.handler("Gdk", 8, "a genuine gdk error", None)
 
     assert glib.forwarded == [("Gdk", 8, "a genuine gdk error")]
+
+
+def test_appindicator_noise_matches_only_the_deprecation_warning():
+    known = (
+        "libayatana-appindicator is deprecated. Please use "
+        "libayatana-appindicator-glib in newly written code."
+    )
+
+    assert appindicator_noise(known) is True
+    assert appindicator_noise("a genuine indicator warning") is False
+    assert appindicator_noise("") is False
+
+
+def test_appindicator_log_filter_drops_only_the_known_message():
+    glib = _FakeGLib()
+
+    install_appindicator_log_filter(glib)
+
+    assert glib.domain == "libayatana-appindicator"
+    assert glib.levels == _FakeGLib.LogLevelFlags.LEVEL_WARNING
+    glib.handler(
+        "libayatana-appindicator",
+        16,
+        "libayatana-appindicator is deprecated. Please use "
+        "libayatana-appindicator-glib in newly written code.",
+        None,
+    )
+    glib.handler("libayatana-appindicator", 16, "a genuine warning", None)
+
+    assert glib.forwarded == [
+        ("libayatana-appindicator", 16, "a genuine warning")
+    ]
 
 
 def test_menu_presets_stay_within_range_and_on_the_step_grid():
@@ -1247,6 +1285,33 @@ def test_bring_to_current_ignores_windows_without_an_xid():
     assert _bring_to_current_desktop(unmapped) is False
 
 
+def test_bring_to_current_asks_the_provider_on_wayland():
+    wayland_like = types.SimpleNamespace(get_window=lambda: types.SimpleNamespace())
+    calls = []
+    app = types.SimpleNamespace(
+        move_to_current_desktop=lambda: calls.append("move") or True
+    )
+
+    assert _bring_to_current_desktop(wayland_like, app) is True
+    assert calls == ["move"]
+
+
+def test_move_to_current_desktop_delegates_to_the_zone_provider():
+    app = TrayApp.__new__(TrayApp)
+    calls = []
+    app.watcher = types.SimpleNamespace(
+        zones=types.SimpleNamespace(
+            move_to_current_desktop=lambda: calls.append("move") or True
+        )
+    )
+
+    assert app.move_to_current_desktop() is True
+    assert calls == ["move"]
+
+    app.watcher = types.SimpleNamespace(zones=None)
+    assert app.move_to_current_desktop() is False
+
+
 def test_temperature_levels_span_cold_to_warm_with_ten_radio_labels():
     assert TEMPERATURE_LEVELS == (100, 89, 78, 67, 56, 44, 33, 22, 11, 0)
     assert len(TEMPERATURE_LEVEL_PRESETS) == 10
@@ -1333,6 +1398,48 @@ def test_autostart_path_follows_xdg_config_home(monkeypatch, tmp_path):
     assert autostart_path() == tmp_path / "autostart" / "dasungctl-tray.desktop"
 
 
+def test_launcher_script_runs_the_source_runner_with_system_python():
+    script = launcher_script()
+
+    assert script.startswith("#!/bin/sh\n")
+    assert "_source_run.py" in script
+    assert "/usr/bin/python3" in script
+    assert 'exec "$python" "$runner" "$@"' in script
+    # A missing checkout explains itself, also through a notification.
+    assert 'if [ ! -f "$runner" ]' in script
+    assert "notify-send" in script
+    assert "exit 1" in script
+
+
+def test_launcher_script_quotes_a_checkout_with_spaces(monkeypatch, tmp_path):
+    import shlex
+
+    from dasungctl import tray
+
+    source = tmp_path / "checkout dir" / "src"
+    monkeypatch.setattr(tray, "__file__", str(source / "tray.py"))
+
+    script = tray.launcher_script()
+
+    runner = str(source / "_source_run.py")
+    assert f"runner={shlex.quote(runner)}" in script
+    # Unquoted, the space would split the path at `checkout`.
+    assert f"runner={runner}" not in script
+
+
+def test_write_launcher_writes_an_executable_script(monkeypatch, tmp_path):
+    from dasungctl import tray
+
+    monkeypatch.setattr(tray.Path, "home", classmethod(lambda cls: tmp_path))
+
+    target = write_launcher()
+
+    assert target == tmp_path / ".local" / "bin" / "dasungctl"
+    assert target.read_text(encoding="utf-8") == launcher_script()
+    assert target.stat().st_mode & 0o777 == 0o755
+    assert launcher_path() == target
+
+
 # -- zone clearing (TrayApp's waves and auto policy) --------------------------
 
 
@@ -1341,6 +1448,7 @@ class _FakeClearer:
         self.available = available
         self.busy = False
         self.calls = []
+        self.unavailable_note = "local clearing needs X11"
 
     def flash(self, rects, phases, on_done):
         self.calls.append((list(rects), phases, on_done))

@@ -19,13 +19,32 @@
 
 ## Environment and commands
 
+A checkout shared between the two machines holds one environment per machine:
+`.venv` on the Linux Mint install (X11) and `.venv-fedora` on the Fedora one
+(Wayland, built on the system Python). Use the environment of the machine you
+are on, and after moving source files refresh its editable install with
+`uv pip install --python <venv>/bin/python -e ".[dev]"`.
+
 ```console
+# Linux Mint machine (X11)
 uv venv
 source .venv/bin/activate
 uv pip install -e ".[dev]"
+.venv/bin/python -m pytest -q
+```
 
-python -m pytest -q                 # seconds, never touches hardware
-python -m pytest tests/test_tray.py -q
+```console
+# Fedora machine (Wayland)
+uv venv --python /usr/bin/python3 .venv-fedora
+uv pip install --python .venv-fedora/bin/python -e ".[dev]"
+.venv-fedora/bin/python -m pytest -q
+```
+
+Single tests and lint (replace `<venv>` with the environment above):
+
+```console
+<venv>/bin/python -m pytest tests/test_tray.py -q
+<venv>/bin/python -m pytest -k name
 uvx ruff check src tests --select F,E9
 ```
 
@@ -59,12 +78,28 @@ keep tests in `tests/test_panels.py` in step with the tables.
 
 ## Wayland backend status
 
-The ScreenCast/PipeWire capture path for the ghost estimate
-(`screencap.WaylandCapture`) and the KWin window labels
-(`windows.KWinZones`) exist in the code but are **experimental and outside
-the tested configuration** for 0.1: the tested setup is Linux Mint on X11,
-the zone-clearing overlay is not available on Wayland at all, and the
-compositor permission dialogs make the first sample interactive.
+The tested configurations are Linux Mint (Cinnamon) on X11 and Fedora (KDE
+Plasma) on Wayland. On Wayland:
+
+- the ghost capture goes through the ScreenCast portal
+  (`screencap.WaylandCapture`); the first start shows the share dialog unless
+  a granted restore token is already stored, and later starts reuse it
+  silently (verified on KDE);
+- the window labels come from KWin's scripting interface
+  (`windows.KWinZones`), one provider instance per process;
+- the panel-presence check (`screencap.drm_output_present`) matches the
+  panel profile's EDID names against the connected DRM outputs in
+  `/sys/class/drm`, so a switched-off panel is detected as on X11;
+- zone clearing uses layer-shell overlays (`zoneclear.WaylandZoneFlasher`),
+  available on KDE and wlroots compositors; GNOME does not expose
+  layer-shell to applications, so there the feature reports itself
+  unavailable;
+- moving the tray windows to the desktop in use runs the KWin script
+  `windows.KWIN_MOVE_SCRIPT`, matching the `dasungctl` resource class.
+
+GNOME Wayland and wlroots compositors are untested: capture should work
+everywhere through the portal, labels need KDE's KWin scripting, and clearing
+needs layer-shell. The X11 path stays the reference.
 
 ## Releasing
 

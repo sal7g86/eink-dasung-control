@@ -145,23 +145,27 @@ def _x11_current_desktop() -> int | None:
         connection.close()
 
 
-def _bring_to_current_desktop(window) -> bool:
-    """Move an already-open X11 window to the desktop in use.
+def _bring_to_current_desktop(window, app=None) -> bool:
+    """Move an already-open window to the desktop in use.
 
     Windows stay on the workspace where they were opened: only choosing one
-    again from the tray menu moves it here. Cinnamon/Muffin acts on the EWMH
-    client message but ignores the equivalent property change; on Wayland the
-    compositor decides.
+    again from the tray menu moves it here. On X11 the EWMH client message
+    is used (Cinnamon/Muffin acts on it but ignores the equivalent property
+    change); Wayland gives applications no API for this, so on KDE the tray
+    asks its KWin scripting provider for the same move. Best-effort.
     """
 
     gdk_window = window.get_window()
     get_xid = getattr(gdk_window, "get_xid", None)
-    if get_xid is None:
-        return False
-    current = _x11_current_desktop()
-    if current is None:
-        return False
-    return _x11_desktop_message(get_xid(), current)
+    if get_xid is not None:
+        current = _x11_current_desktop()
+        if current is None:
+            return False
+        return _x11_desktop_message(get_xid(), current)
+    move = getattr(app, "move_to_current_desktop", None)
+    if callable(move):
+        return bool(move())
+    return False
 
 
 class ControlsWindow:
@@ -436,7 +440,7 @@ class ControlsWindow:
             self.spinner.hide()
             self.status_icon.hide()
         else:
-            _bring_to_current_desktop(self.window)
+            _bring_to_current_desktop(self.window, self.app)
         self.window.present()
 
     def update(self) -> None:
@@ -782,8 +786,7 @@ class GhostWindow:
                 self.Gtk, ("edit-clear-all-symbolic", "edit-clear-symbolic")
             )
             or "edit-clear-symbolic",
-            "Flash every estimated area once, worst first; oversized areas "
-            "are cleared in blocks (X11 only)",
+            "Flash every estimated area once, worst first",
         )
         clear.connect("clicked", lambda _button: self.app._ghost_clear_now())
         self.clear_button = clear
@@ -1050,7 +1053,7 @@ class GhostWindow:
             self.window.show_all()
             self._mapped_once = True
         else:
-            _bring_to_current_desktop(self.window)
+            _bring_to_current_desktop(self.window, self.app)
         self.window.present()
 
     def _on_delete(self, *_args):
@@ -1082,12 +1085,16 @@ class GhostWindow:
         self.clear_switch.set_active(bool(app.controller.state.ghost_clear))
         self._clear_updating = False
         self.clear_switch.set_sensitive(available)
-        self.clear_switch.set_tooltip_text(
-            "Flash the worst estimated area automatically once the screen "
-            "is quiet. On by default; the choice is remembered."
-            if available
-            else "Automatic clearing is available on X11 only"
-        )
+        if available:
+            note = (
+                "Flash the worst estimated area automatically once the "
+                "screen is quiet. On by default; the choice is remembered."
+            )
+        else:
+            note = getattr(clearer, "unavailable_note", None) or (
+                "Automatic clearing is not available in this session"
+            )
+        self.clear_switch.set_tooltip_text(note)
         self.clear_button.set_sensitive(
             available and not busy and bool(result is not None and result.elements)
         )

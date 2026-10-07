@@ -3,10 +3,15 @@
 import sys
 import types
 
+import pytest
+
 from dasungctl.windows import (
     IGNORED_APPS,
+    KWIN_MOVE_SCRIPT,
+    KWinZones,
     X11Zones,
     Zone,
+    ZoneUnavailable,
     lookup_zone,
     normalize_app,
     to_monitor_zones,
@@ -228,3 +233,88 @@ def test_x11_zones_skip_unmapped_windows(monkeypatch):
     zones = X11Zones().zones(3760, 533, 942, 1256)
 
     assert [zone.app for zone in zones] == ["konsole"]
+
+
+# -- KWinZones without a compositor -------------------------------------------
+
+
+def test_kwin_zones_convert_the_reported_windows(monkeypatch):
+    provider = KWinZones()
+    monkeypatch.setattr(
+        provider,
+        "_query",
+        lambda: [
+            window("org.kde.konsole", 3440, 182, 943, 1257),
+            window("firefox", 100, 100, 400, 300),
+        ],
+    )
+
+    zones = provider.zones(3440, 182, 943, 1257)
+
+    assert [zone.app for zone in zones] == ["konsole"]
+    assert zones[0].fullscreen is True
+
+
+def test_kwin_zones_surface_the_query_failure(monkeypatch):
+    provider = KWinZones()
+    calls = []
+
+    def broken():
+        calls.append(1)
+        raise RuntimeError("no reply")
+
+    monkeypatch.setattr(provider, "_query", broken)
+
+    with pytest.raises(ZoneUnavailable) as first:
+        provider.zones(0, 0, 100, 100)
+    assert "no reply" in str(first.value)
+
+    # The retry window reports the same failure without querying again.
+    with pytest.raises(ZoneUnavailable) as second:
+        provider.zones(0, 0, 100, 100)
+    assert "no reply" in str(second.value)
+    assert len(calls) == 1
+
+
+def test_kwin_zones_recover_after_a_failure(monkeypatch):
+    provider = KWinZones()
+    state = {"fail": True}
+
+    def query():
+        if state["fail"]:
+            raise RuntimeError("not ready")
+        return [window("kate", 0, 0, 100, 100)]
+
+    monkeypatch.setattr(provider, "_query", query)
+
+    with pytest.raises(ZoneUnavailable):
+        provider.zones(0, 0, 100, 100)
+
+    state["fail"] = False
+    provider._failed_at = 0.0  # the backoff expired
+    zones = provider.zones(0, 0, 100, 100)
+
+    assert [zone.app for zone in zones] == ["kate"]
+    assert provider._last_error is None
+
+
+def test_kwin_move_to_current_desktop_runs_the_action(monkeypatch):
+    provider = KWinZones()
+    loaded = []
+    unloaded = []
+    monkeypatch.setattr(
+        provider, "_load_and_start", lambda script: loaded.append(script)
+    )
+    monkeypatch.setattr(provider, "_unload", lambda: unloaded.append(1))
+
+    assert provider.move_to_current_desktop() is True
+    assert loaded == [KWIN_MOVE_SCRIPT]
+    assert unloaded == [1]
+
+    def broken(_script):
+        raise RuntimeError("no compositor")
+
+    monkeypatch.setattr(provider, "_load_and_start", broken)
+    assert provider.move_to_current_desktop() is False
+    # The script is still unloaded after a failed start.
+    assert len(unloaded) == 2

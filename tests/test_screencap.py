@@ -7,6 +7,7 @@ import pytest
 
 from dasungctl import screencap
 from dasungctl.screencap import (
+    drm_output_present,
     edid_monitor_name,
     gray_from_channels,
     load_restore_token,
@@ -194,7 +195,79 @@ def test_monitor_output_present_gives_up_when_it_cannot_tell(monkeypatch):
     assert monitor_output_present(_gdk(None)) is None
 
     monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+    monkeypatch.setattr(screencap, "drm_output_names", lambda root=None: {})
     assert monitor_output_present(_gdk([dell])) is None
+
+
+# -- DRM sysfs outputs (the Wayland presence check) ---------------------------
+
+
+def fake_edid(name: str) -> bytes:
+    edid = bytearray(128)
+    edid[:8] = b"\x00\xff\xff\xff\xff\xff\xff\x00"
+    padded = name.encode("latin-1")[:13].ljust(13, b" ")
+    edid[54:72] = b"\x00\x00\x00\xfc\x00" + padded
+    return bytes(edid)
+
+
+def fake_drm(tmp_path, outputs):
+    """Build a fake /sys/class/drm tree: (entry, status, model) tuples."""
+
+    root = tmp_path / "drm"
+    for entry, status, model in outputs:
+        path = root / entry
+        path.mkdir(parents=True)
+        (path / "status").write_text(status + "\n", encoding="utf-8")
+        (path / "edid").write_bytes(fake_edid(model) if model else b"")
+    return root
+
+
+def test_drm_output_present_matches_the_edid_names(tmp_path):
+    root = fake_drm(
+        tmp_path,
+        [
+            ("card2-HDMI-A-3", "connected", "CF791"),
+            ("card1-DP-1", "connected", "Paperlike H D"),
+            ("card1-DP-2", "disconnected", "Paperlike H D"),
+        ],
+    )
+
+    assert drm_output_present(root=root) is True
+    # The panel's output is gone: the desktop monitor alone is not the panel.
+    only_desktop = fake_drm(
+        tmp_path / "desk", [("card2-HDMI-A-3", "connected", "CF791")]
+    )
+    assert drm_output_present(root=only_desktop) is False
+    # A configured ghost.output matches the output name directly.
+    assert drm_output_present(wanted="DP-1", root=root) is True
+    assert drm_output_present(wanted="DP-9", root=root) is False
+
+
+def test_drm_output_present_gives_up_when_it_cannot_tell(tmp_path):
+    # No readable DRM entries at all.
+    assert drm_output_present(root=tmp_path / "missing") is None
+    # A connected output whose EDID name cannot be read: `auto` cannot tell...
+    no_edid = fake_drm(tmp_path / "noedid", [("card1-DP-1", "connected", None)])
+    assert drm_output_present(root=no_edid) is None
+    # ...but a named output still matches the output name.
+    assert drm_output_present(wanted="DP-1", root=no_edid) is True
+    # Disconnected connectors are not candidates; with no connected output
+    # at all the check cannot tell and keeps the serial-only behaviour.
+    off = fake_drm(tmp_path / "off", [("card1-DP-1", "disconnected", "Paperlike")])
+    assert drm_output_present(root=off) is None
+    assert drm_output_present(wanted="DP-1", root=off) is None
+
+
+def test_monitor_output_present_uses_the_drm_check_on_wayland(monkeypatch):
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+    monkeypatch.setattr(
+        screencap, "drm_output_names", lambda root=None: {"DP-1": "Paperlike H D"}
+    )
+
+    assert monitor_output_present(_gdk(None)) is True
+
+    monkeypatch.setattr(screencap, "drm_output_names", lambda root=None: {})
+    assert monitor_output_present(_gdk(None)) is None
 
 
 def test_restore_token_round_trip(tmp_path):

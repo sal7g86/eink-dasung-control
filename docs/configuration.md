@@ -45,7 +45,9 @@ Configuration lives in `$XDG_CONFIG_HOME/dasungctl/config.json`
   [ghost-estimate.md](ghost-estimate.md)): `interval` is the base sampling
   period in seconds, `max_interval` the cap reached while nothing changes,
   `threshold` the 0-100 level that writes the threshold alert to the log,
-  `output` the monitor name substring for X11 (ignored on Wayland), and
+  `output` the monitor name substring (the X11 capture auto-detect and the
+  monitor-presence check; on Wayland the share dialog still picks the
+  screen), and
   `width` the model's horizontal resolution (higher costs more CPU and
   memory per sample; see the *Costs* section of
   [ghost-estimate.md](ghost-estimate.md)).

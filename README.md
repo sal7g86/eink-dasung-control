@@ -14,8 +14,9 @@ before reporting success. The only confirmed model is the **Dasung Paperlike
 HD Revolutionary 13.3″ (40 Hz, protocol `0x30`), the HD-FT variant with
 frontlight and touchscreen**; other Dasung models are untested, but every
 panel-specific value lives in one small profile, so adding a monitor means
-filling that profile instead of changing the code. It runs on Linux with X11
-and has been tested on Linux Mint.
+filling that profile instead of changing the code. It runs on Linux with
+X11 or Wayland and has been tested on Linux Mint (Cinnamon) and Fedora (KDE
+Plasma).
 
 <p align="center">
   <img src="docs/images/demo.gif" alt="Animated demo: the tray menu opens Controls and Ghost estimate">
@@ -41,10 +42,10 @@ and has been tested on Linux Mint.
   doctor prints the active panel profile and warns when the monitor reports
   a different protocol version.
 - **Automatic zone clearing**: when the ghost estimate sees an area getting
-  old, the tray flashes it white or grey with a borderless X11 overlay, so
-  the controller rewrites those pixels. All due areas are cleared in one
-  synchronized wave, even while the screen is in use, and the estimate for
-  each area is reset afterwards.
+  old, the tray flashes it white or grey with a borderless overlay — an X11
+  window or a Wayland layer-shell surface — so the controller rewrites those
+  pixels. All due areas are cleared in one synchronized wave, even while the
+  screen is in use, and the estimate for each area is reset afterwards.
 - `Ghost estimate…` diagnostic window: ghost-only preview, the list of estimated
   areas with their application, severity, polarity and age, the clearing
   switch, the flash settings editor and a `Test flash` preview.
@@ -59,11 +60,12 @@ and has been tested on Linux Mint.
   tables are collected in one place and
   [docs/panels.md](docs/panels.md) explains how to add a model from captured
   evidence.
-- **System:** Linux on X11. The serial control does not depend on the
-  display server, but the tray and the ghost estimate are exercised on X11,
-  and only Linux Mint (Cinnamon) has been tested. A Wayland capture backend
-  exists but is experimental
-  ([docs/development.md](docs/development.md)).
+- **System:** Linux with a GTK 3 desktop. The serial control does not depend
+  on the display server; the tray and the ghost estimate are tested on Linux
+  Mint (Cinnamon, X11) and Fedora (KDE Plasma, Wayland). On Wayland the
+  capture goes through the ScreenCast portal, the window labels through KWin
+  scripting and zone clearing through layer-shell (KDE and wlroots, not
+  GNOME) ([docs/development.md](docs/development.md)).
 
 ## How it works
 
@@ -85,26 +87,37 @@ and has been tested on Linux Mint.
 ## Installation
 
 Python 3.10 or newer, a Dasung monitor connected over USB, and a Linux
-desktop with GTK 3 for the tray. No virtualenv is needed: on Mint and Ubuntu
-install the system packages and run the program from the checkout.
+desktop with GTK 3 for the tray. No virtualenv is needed: install the system
+packages and run the program from the checkout.
 
 ```console
+# Debian/Ubuntu (Mint, X11)
 sudo apt install python3-serial python3-gi gir1.2-gtk-3.0 \
   gir1.2-ayatanaappindicator3-0.1 python3-xlib
+# Fedora (KDE, Wayland)
+sudo dnf install python3-pyserial python3-gobject gtk3 \
+  libayatana-appindicator-gtk3 gtk-layer-shell
 git clone https://github.com/sal7g86/eink-dasung-control.git
 cd eink-dasung-control
 python3 src/_source_run.py
 ```
 
-`python3` must be the interpreter that owns the GTK bindings (on Mint and
-Ubuntu it is `/usr/bin/python3`). If you want a `dasungctl` command on
-`PATH`, `pipx install .` does it cleanly: pipx keeps the program in its own
+`python3` must be the interpreter that owns the GTK bindings (on Mint,
+Ubuntu and Fedora it is `/usr/bin/python3`). If you want a `dasungctl`
+command on `PATH`, `dasungctl tray --install-launcher` writes a small
+launcher that runs the checkout and explains a missing disk, and
+`pipx install .` does it cleanly too: pipx keeps the program in its own
 virtualenv, and the tray re-executes itself with the system Python, so the
 GTK bindings are still found. `python3 -m pip install --user .` is the
 manual variant, and on distributions with PEP 668 it needs
-`--break-system-packages`. Fedora packages, the optional X11 window labels
+`--break-system-packages`. Package details, the optional X11 window labels
 and serial permissions are covered in
 [docs/installation.md](docs/installation.md).
+
+On a Wayland session the first sample opens the screen-share dialog: pick
+the Dasung monitor there, and the capture stays on that monitor only. The
+grant is remembered, so later starts are silent; local zone clearing needs
+`gtk-layer-shell` (KDE and wlroots, not GNOME).
 
 ## Usage
 
@@ -152,7 +165,7 @@ a separate project and is not part of this repository.
 
 ## Status
 
-0.1.3, alpha. Monitor control is conservative and verified against the
+0.1.4, alpha. Monitor control is conservative and verified against the
 recorded captures; the ghost estimate is experimental and still needs
 calibration on the panel. See [docs/ghost-estimate.md](docs/ghost-estimate.md)
 for the known limitations.

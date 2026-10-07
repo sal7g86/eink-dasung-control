@@ -10,8 +10,9 @@ the alert after a soft/hard refresh or the `Reset estimate` button. The
 preview is deliberately ghost-only: the point is to compare where the
 estimator thinks the ghosts are with the physical panel.
 On X11 the window remains on the workspace where it was opened; choosing it
-again from the tray menu moves it to the workspace in use (on Wayland that
-choice belongs to the compositor).
+again from the tray menu moves it to the workspace in use. On KDE Wayland
+the tray asks KWin for the same move through its scripting interface; on
+other compositors that choice belongs to the compositor.
 
 The estimate is an **experimental** feature in 0.1: the model constants are
 assumptions to calibrate against the panel, and only a photo of the panel can
@@ -50,7 +51,7 @@ names). On KDE Wayland no standard API exposes other applications' windows,
 so the tray asks KWin's scripting interface — the same route tools like
 `kdotool` use — and only reads the class, geometry and fullscreen flag, never
 window titles. When the label channel is unavailable, the areas keep their
-plain coordinates.
+plain coordinates and the estimate window says why the query failed.
 
 While nothing changes the sampling interval doubles from `interval` up to
 `max_interval`, so an idle screen costs almost nothing; the first change, and
@@ -126,25 +127,33 @@ proven: the area is only rewritten, so a heavy ghost can leave a residue that
 needs a global refresh. Judge it on the panel, and treat the fewer, larger
 flashes as the better trade.
 
-Local clearing is available on **X11 only**: on Wayland a window cannot be
-placed at global coordinates, and the tray reports the feature as
-unavailable.
+Local clearing needs a placement route for its overlay. On X11 it is an
+override-redirect window at global screen coordinates; on Wayland it is a
+layer-shell surface anchored to the captured output, which KDE and wlroots
+compositors provide but GNOME does not — there the tray reports the feature
+as unavailable.
 
 ## Capture backends
 
 On Wayland the first sample asks for a screen share and the Dasung monitor
 must be picked in the dialog. The tray registers a stable application id
-(`dasungctl`) with the portal, so the grant and its restore token can survive
-the next start; if the compositor asks again, pick the monitor once more.
-KWin's own screenshot API is allowlisted to installed screenshot
-applications, so the tray uses the ScreenCast portal and reads the PipeWire
-stream with GStreamer; no image is written to disk.
+(`dasungctl`) with the portal, so the grant and its restore token survive
+the next start: with the stored token later starts open the session silently
+(verified on KDE), and only a refused or expired grant asks again. KWin's
+own screenshot API is allowlisted to installed screenshot applications, so
+the tray uses the ScreenCast portal and reads the PipeWire stream with
+GStreamer; no image is written to disk.
 
 On X11 the Dasung region of the root window is captured directly; the
 automatic detection reads the monitors' EDID model names through
 `python-xlib`, since Gdk only reports the RandR output name there, and
 matches them against the active panel profile's `edid_names`; `ghost.output`
 selects the monitor when that fails, by model or by output name (`DP-1`).
+
+The capture covers only the panel's monitor on both backends: the estimate
+never sees the rest of the desktop. The label channel reads window geometry
+and class only — never titles or pixels — and the panel-presence check reads
+the outputs' EDID and connection state.
 
 ## Costs
 
@@ -181,6 +190,22 @@ single GTK thread, so a sample runs between two interface updates: the
 defaults stay in the low tens of milliseconds, but a large `ghost.width`
 makes a sample tens to hundreds of milliseconds and a visible hitch.
 
+The same steps measured on the maintainer's Wayland machine (Fedora KDE,
+Python 3.14, the same panel rotated 90° and scaled 1.75, so the model is
+480×640):
+
+| Step | Cost |
+| --- | --- |
+| open the portal session and take the first frame | 0.12 s with the stored grant, no dialog |
+| ScreenCast pipeline open but idle | 0.1% of one core, ~51 MB RSS |
+| frame pull | 1–30 ms when a new frame is available; up to ~1 s while the panel does not change, because the stream is damage-driven |
+| model update, 480×640 | 19 ms with ~10% of the pixels changed, 46 ms on a whole-frame change |
+| the whole tray process, estimate and auto-clearing active | ~100 MB RSS, ~1.7% CPU over a session |
+
+The Wayland pipeline only produces frames on damage, so an idle panel is
+nearly free, and the open `Ghost estimate…` window (or an auto-clear wave)
+keeps pulling them at the base cadence instead.
+
 ## Known limitations
 
 - Both polarities are estimated: dark residue on light content and light
@@ -189,13 +214,13 @@ makes a sample tens to hundreds of milliseconds and a visible hitch.
   `noise`, `min_error`, `gamma_ink` and `gamma_erase` are assumptions, not
   yet configurable (`threshold` is). Compare the estimate with the panel
   over a few sessions and tune them.
-- On KDE Wayland a combined run once produced an element without its
-  application label. The tray now builds a single provider instance per
-  process (`open_zones()` is called once), so the suspected double D-Bus
-  registration cannot happen; the visual re-test is still pending, and the
-  X11 provider is unaffected.
-- The restore-token reuse on Wayland was verified once (the dialog did not
-  reappear), but a second silent start is still to be confirmed.
+- On Wayland the clearing overlay needs layer-shell: KDE and wlroots
+  compositors provide it, GNOME does not and the feature reports itself
+  unavailable. Capture works through the portal everywhere; the window
+  labels need KDE's KWin scripting.
+- The monitor-presence check on Wayland reads `/sys/class/drm`; without
+  readable connected outputs it returns "cannot tell" and only the serial
+  exchanges decide, as on X11 without the EDID names.
 
 ## Implementation notes
 
@@ -236,7 +261,17 @@ These are the non-obvious points future changes must keep in mind.
   the deprecated `register_object` with a local warning filter.
 - The KWin script lives in `$XDG_RUNTIME_DIR/dasungctl-zones.js`, plugin name
   `dasungzones`; the report comes back through `callDBus` to
-  `org.dasungctl.Zones`.
+  `org.dasungctl.Zones`. The desktop-move action
+  (`windows.KWIN_MOVE_SCRIPT`) reuses the same file and plugin and matches
+  the `dasungctl` resource class, which GTK derives from the program name on
+  Wayland (`GLib.set_prgname` in the tray startup).
+- A Wayland overlay must contain a drawing widget: a bare `Gtk.Window` on a
+  layer surface never attaches a buffer, so the surface stays invisible.
+  `zoneclear.WaylandZoneFlasher` paints the phase colour in a
+  `Gtk.DrawingArea`.
+- The Wayland panel-presence check reads the connected outputs and their
+  EDID names in `/sys/class/drm`; the entry names drop the `cardN-` prefix
+  and match the compositor's output names (`DP-1`).
 - *The model* section above describes the formulas; keep it in sync with
   `ghostwatch.py`. Components are built per polarity, and the label is
   recorded when a cell first becomes dirty and kept while it stays dirty.

@@ -12,11 +12,15 @@ dasungctl tray
 dasungctl --device /dev/ttyUSB1 --timeout 2.0 --interval 300
 dasungctl --device /dev/ttyUSB1 tray
 dasungctl tray --install-autostart   # ~/.config/autostart/dasungctl-tray.desktop
+dasungctl tray --install-launcher    # ~/.local/bin/dasungctl
 ```
 
 `--device` and `--timeout` override the serial settings of the configuration
 and `--interval` the auto-refresh timer (seconds); `--config` selects another
-configuration file. `--install-autostart` writes the login entry and exits.
+configuration file. `--install-autostart` writes the login entry and
+`--install-launcher` the `dasungctl` command on `PATH` (a script that runs
+this checkout with the system Python and reports a missing disk); both exit
+without starting the tray.
 
 The tray runs with the system Python, where the GTK bindings live; started
 from an interpreter without them — the project virtualenv, a `pipx`
@@ -43,9 +47,12 @@ is `Custom` or `mixed` (the firmware reads the project's custom value as
 mixed). The panel tooltip shows the full state and, on panels that render
 indicator labels (such as KDE), the label shows the current mode.
 `Ghost estimate…` opens the experimental ghost estimate
-(see [ghost-estimate.md](ghost-estimate.md)).
+(see [ghost-estimate.md](ghost-estimate.md)): it captures only the panel's
+monitor — the Dasung region of the root window on X11, the monitor picked in
+the share dialog on Wayland.
 Both windows remain on the workspace where they are opened; choosing one
-again from the menu moves it to the workspace in use.
+again from the menu moves it to the workspace in use (on KDE Wayland the
+tray asks KWin; on other compositors that choice belongs to the compositor).
 
 The first menu row is the status line (`reloaded`, `monitor changed: …`,
 `auto-refresh on`, …). Failures are compressed to one short sentence —
@@ -59,14 +66,16 @@ severity, not the text.
 
 Two signals decide whether the monitor is usable. The serial exchanges are
 the first: after two failed reads in a row the tray declares the monitor
-unavailable. The second is the e-ink display output (X11): the panel's HDMI
+unavailable. The second is the e-ink display output: the panel's HDMI
 receiver disappears when it is switched off, while the CH340 stays powered
 and keeps answering the stored values, so the output is the only confirmed
-way to tell "off" from "on". The startup check is conclusive immediately; a
-later miss needs two in a row, so a display reconfiguration does not switch
-the automatic features off. On Wayland, or on X11 without python-xlib and
-without `ghost.output` naming the output, the check cannot tell and only the
-serial exchanges are used.
+way to tell "off" from "on". On X11 the check reads the Gdk monitors' EDID
+names through python-xlib; on Wayland it reads the connected DRM outputs in
+`/sys/class/drm` and matches the same names. The startup check is conclusive
+immediately; a later miss needs two in a row, so a display reconfiguration
+does not switch the automatic features off. Without python-xlib on X11,
+without `ghost.output` naming the output, or when no output data is
+readable, the check cannot tell and only the serial exchanges are used.
 
 A panel known to be off is never talked to: the tray skips `Reload from
 monitor`, the refresh actions and the serial poll, and a tray started with
@@ -207,15 +216,17 @@ dasungctl doctor --json
   panel-specific values live in one profile, so adding a model means filling
   that profile after capturing the same evidence
   ([panels.md](panels.md)).
-- **Platform**: Linux on X11. The serial control itself does not depend on
-  the display server, but the tray and the ghost estimate are exercised on
-  X11, and only Linux Mint (Cinnamon) has been tested. The Wayland capture
-  backend is experimental and outside the tested configuration (see
-  [development.md](development.md)).
+- **Platform**: Linux with a GTK 3 desktop. Tested on Linux Mint (Cinnamon,
+  X11) and Fedora (KDE Plasma, Wayland). On Wayland the capture goes through
+  the ScreenCast portal, the window labels through KWin scripting, the
+  panel detection through DRM sysfs, and zone clearing through layer-shell
+  on KDE and wlroots compositors (not on GNOME, which does not expose
+  layer-shell to applications). Other Wayland compositors are untested; see
+  [development.md](development.md).
 - Writes are verified against the monitor's acknowledgement and only one
   `dasungctl` session can hold the serial port at a time. No loop, range
   scanner or fuzzer is included.
-- There is no serial regional refresh: zone clearing is a software overlay,
-  available on X11 only. The CH341 programmer interface, HDMI DDC/I2C, the
-  touchscreen and the vendor-specific HID interface are outside the current
-  implementation.
+- There is no serial regional refresh: zone clearing is a software overlay
+  (an X11 window or a Wayland layer-shell surface). The CH341 programmer
+  interface, HDMI DDC/I2C, the touchscreen and the vendor-specific HID
+  interface are outside the current implementation.

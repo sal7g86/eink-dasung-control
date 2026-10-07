@@ -3,6 +3,54 @@
 All notable changes to this project are documented in this file. The format
 follows Keep a Changelog, and versions use semantic versioning.
 
+## 0.1.4 — 2026-10-07
+
+Wayland parity for the ghost estimate and window handling, one launcher
+install on every machine, and a quieter startup.
+
+### Added
+
+- **Zone clearing on Wayland**: the clearing overlay is a layer-shell
+  surface anchored to the captured output, so the automatic and manual
+  flashes work on compositors that offer layer-shell to applications (KDE,
+  wlroots); on GNOME the feature reports itself unavailable, and X11 keeps
+  the override-redirect window.
+- **Monitor availability on Wayland**: the "panel off" detection now works
+  there too, matching the panel profile's EDID names against the connected
+  DRM outputs in `/sys/class/drm`; before, only the serial exchanges decided
+  on Wayland.
+- **Windows on the current desktop on KDE Wayland**: choosing `Controls…` or
+  `Ghost estimate…` again moves it to the desktop in use through a short KWin
+  script, like the EWMH client message does on X11.
+- **`dasungctl tray --install-launcher`**: writes `~/.local/bin/dasungctl`,
+  a launcher that runs the checkout with the system Python and reports a
+  missing disk instead of failing silently. It is the same installation on
+  every machine (X11 and Wayland); the per-machine virtualenvs stay
+  development-only.
+
+### Fixed
+
+- Starting the tray from a terminal no longer prints the
+  `libayatana-appindicator` deprecation warning: the known message is
+  filtered like the Gdk noise, and every other indicator warning still
+  shows.
+- A failing KWin window-label query is no longer swallowed: the estimate
+  window shows the reason instead of silently dropping the labels.
+- The `Clear areas` tooltip no longer mentions block splitting (removed
+  before 0.1.3) or X11.
+
+### Changed
+
+- Docs: platform parity for Fedora/KDE/Wayland — quick install for both
+  distributions, the capture scope (only the panel's monitor), the measured
+  Wayland resource costs and per-machine development commands.
+- Docs: a note on KDE Wayland theming — the GTK theme name comes from the
+  Settings portal's GNOME fallback, so a leftover dark GNOME theme makes the
+  windows dark while KDE shows a light color scheme
+  (`gsettings set org.gnome.desktop.interface gtk-theme Breeze`).
+- The README animation and screenshots still refer to version 0.1 and do not
+  show the Wayland work.
+
 ## 0.1.3 — 2026-10-05
 
 Monitor availability, short status messages, the e-ink terminal theme and
