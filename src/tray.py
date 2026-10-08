@@ -79,8 +79,9 @@ AUTOSTART_FILENAME = "dasungctl-tray.desktop"
 LAUNCHER_FILENAME = "dasungctl"
 ICON_NAME = "dasung-ink"
 ICON_FILENAME = f"{ICON_NAME}.png"
-# Theme icons adapt to light and dark panels; the bundled PNG is only a
-# fallback because a light-detailed bitmap reads as a white blob at 22 px.
+# Fallback chain resolved against the icon theme when the bundled project
+# asset is missing: theme icons adapt to light and dark panels. The asset
+# itself is preferred (see _set_icon) because it tells what the program is.
 ICON_FALLBACKS = ("video-display-symbolic", "video-display", "computer-symbolic")
 # Panel-dependent UI tables. These aliases describe the default profile so
 # module-level importers (tests, helpers) keep working; the tray itself reads
@@ -187,6 +188,7 @@ ICON_AUTO_REFRESH = ("media-playlist-repeat-symbolic", "view-refresh-symbolic")
 ICON_INTERVAL = ("alarm-symbolic", "appointment-soon-symbolic")
 ICON_RELOAD = ("folder-download-symbolic", "document-revert-symbolic")
 ICON_GHOST = ("system-search-symbolic", "edit-find-symbolic")
+ICON_ABOUT = ("help-about-symbolic", "dialog-information-symbolic")
 ICON_QUIT = ("application-exit-symbolic", "system-log-out-symbolic")
 ICON_CUSTOM = ("document-edit-symbolic", "emblem-system-symbolic")
 MODE_ICONS = {
@@ -1128,6 +1130,9 @@ def _load_gtk() -> dict:
         "Gdk": Gdk,
         "GdkPixbuf": GdkPixbuf,
         "Indicator": AyatanaAppIndicator3,
+        # The About window reports the PyGObject version, so the module
+        # itself travels with the binding dict.
+        "gi": gi,
     }
 
 
@@ -1208,6 +1213,7 @@ class TrayApp:
         self.GLib = gtk["GLib"]
         self.Gdk = gtk["Gdk"]
         self.GdkPixbuf = gtk["GdkPixbuf"]
+        self.gi = gtk["gi"]
         self.watcher = watcher
         # The e-ink output probe looks for the same monitor the capture uses
         # (`ghost.output`, `auto` by default) and runs with the serial poll.
@@ -1218,12 +1224,14 @@ class TrayApp:
         self._updating = False
         self._window = None
         self._ghost_window = None
+        self._about_window = None
         # One quit path for the menu entry and SIGINT/SIGTERM, so cleanup
         # (estimate saved, capture closed, overlays destroyed) runs once.
         self._quitting = False
         # Last ghost sampling error written to the log, so a persistent
         # failure is reported once and not on every tick.
         self._logged_ghost_error: str | None = None
+        self._logged_capture_notice: str | None = None
         # Last known monitor reachability: on False -> True the estimate is
         # reset, because the panel state is unknown across the gap.
         self._last_available: bool | None = None
@@ -1262,14 +1270,22 @@ class TrayApp:
         indicator.set_menu(self.menu)
 
     def _set_icon(self, indicator) -> None:
-        """Prefer a symbolic theme icon, fall back to the bundled bitmap."""
+        """Use the project's e-ink monitor icon; theme icons as fallback.
 
+        The bundled drawing is two-tone (dark frame with a light keyline,
+        paper screen) so it reads on light and dark panels; a theme icon is
+        only used when the asset cannot be found.
+        """
+
+        bitmap = icon_path()
+        if bitmap.exists():
+            indicator.set_icon_full(str(bitmap), "DASUNG e-ink monitor")
+            return
         theme = self.Gtk.IconTheme.get_default()
         for name in ICON_FALLBACKS:
             if theme.lookup_icon(name, 24, 0) is not None:
                 indicator.set_icon_full(name, "DASUNG monitor")
                 return
-        indicator.set_icon_full(str(icon_path()), "DASUNG monitor")
 
     # -- menu construction -------------------------------------------------
 
@@ -1442,6 +1458,10 @@ class TrayApp:
         )
         self.menu.append(self.reload_item)
         self.menu.append(Gtk.SeparatorMenuItem())
+        self.about_item = self._image_item(
+            "About…", ICON_ABOUT, lambda: self._open_about_window(None)
+        )
+        self.menu.append(self.about_item)
         self.quit_item = self._image_item("Quit", ICON_QUIT, self.quit)
         self.menu.append(self.quit_item)
 
@@ -1739,6 +1759,18 @@ class TrayApp:
         self._window.present()
         self._window.update()
 
+    # -- about window ------------------------------------------------------
+
+    def _open_about_window(self, _item) -> None:
+        """Create or raise the About window; it never touches the serial port."""
+
+        from .tray_windows import AboutWindow
+
+        if self._about_window is None:
+            self._about_window = AboutWindow(self)
+        self._about_window.present()
+        self._about_window.update()
+
     # -- ghost estimate ----------------------------------------------------
 
     def _open_ghost_window(self, _item) -> None:
@@ -1825,12 +1857,16 @@ class TrayApp:
             self._ghost_window.follow(watcher)
 
     def _log_ghost_error(self, watcher) -> None:
-        """Write a new ghost error to the log once, not on every tick."""
+        """Write a new ghost error (or capture notice) to the log once."""
 
         error = watcher.error
         if error and error != self._logged_ghost_error:
             self.log.error(f"ghost estimate: {error}")
         self._logged_ghost_error = error
+        notice = getattr(getattr(watcher, "capturer", None), "notice", None)
+        if isinstance(notice, str) and notice != self._logged_capture_notice:
+            self.log.warn(f"ghost estimate: {notice}")
+        self._logged_capture_notice = notice
 
     # -- shutdown ----------------------------------------------------------
 
@@ -1968,6 +2004,9 @@ class TrayApp:
                     rect[3],
                 )
                 watcher.reset_area(*local)
+            # Sample at the next tick: the model takes the content revealed
+            # under the flashed areas as clean (GhostModel.reset_area).
+            watcher.request_sample()
         stamp = time.strftime("%H:%M:%S")
         areas = "area" if len(rects) == 1 else "areas"
         self._clear_note = f"{len(rects)} {areas} cleared at {stamp}"
@@ -2077,6 +2116,27 @@ def _install_signal_handlers(gtk, on_signal) -> None:
         )
 
 
+def _window_scale(gdk) -> int:
+    """The GTK window scale on the default display.
+
+    Gdk monitor geometry and GTK window coordinates are in application
+    pixels while the X server (EWMH, RandR) works in device pixels; on
+    integer-scaled X11 sessions (Cinnamon's fractional scaling in
+    `scale-ui-down` mode) the two differ by this factor.
+    """
+
+    display = gdk.Display.get_default()
+    if display is None or display.get_n_monitors() == 0:
+        return 1
+    getter = getattr(display.get_monitor(0), "get_scale_factor", None)
+    if not callable(getter):
+        return 1
+    try:
+        return max(1, int(getter()))
+    except (TypeError, ValueError):
+        return 1
+
+
 def run_tray(
     *,
     config_path: Path | None = None,
@@ -2162,7 +2222,7 @@ def run_tray(
         max_interval=settings["max_interval"],
         threshold=settings["threshold"],
         width=settings["width"],
-        zones=open_zones(),
+        zones=open_zones(_window_scale(gtk["Gdk"])),
     )
     watcher.load_state()
     if settings["enabled"]:

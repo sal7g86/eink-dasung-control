@@ -1,10 +1,12 @@
 """Ghost estimator tests with synthetic frames; no screen and no hardware."""
 
 import json
+import random
 
 import pytest
 
 from dasungctl.ghostwatch import (
+    LIGHT_CONTENT,
     CaptureError,
     Frame,
     GhostElement,
@@ -225,6 +227,163 @@ def test_reset_area_clears_only_the_named_rectangle():
     assert result.changed_pixels == 0
 
 
+def recomputed_stats(model):
+    """Per-cell statistics rebuilt from the pixels, the slow way."""
+
+    cells = model.columns * model.rows
+    counts, sums = [0] * cells, [0] * cells
+    light_counts, light_sums = [0] * cells, [0] * cells
+    for index in range(model.width * model.height):
+        row, column = divmod(index, model.width)
+        cell = (row // model.cell_width) * model.columns + (
+            column // model.cell_width
+        )
+        level = model.error[index]
+        value = model._previous[index]
+        if level <= -model.min_error and value >= LIGHT_CONTENT:
+            counts[cell] += 1
+            sums[cell] -= level
+        elif level >= model.min_error and value < LIGHT_CONTENT:
+            light_counts[cell] += 1
+            light_sums[cell] += level
+    return counts, sums, light_counts, light_sums
+
+
+def test_incremental_statistics_match_a_full_recount():
+    rng = random.Random(11)
+    for width, height, scale in ((32, 32, 1), (45, 29, 3)):
+        model = GhostModel(
+            width,
+            height,
+            width * scale,
+            height * scale,
+            columns=5,
+            min_cell_pixels=4,
+            min_cell_fraction=0.0,
+        )
+        data = bytearray([255]) * (width * height)
+        for step in range(60):
+            for _ in range(rng.randint(0, 4)):
+                x0, y0 = rng.randrange(width), rng.randrange(height)
+                x1 = min(width, x0 + rng.randint(1, 12))
+                y1 = min(height, y0 + rng.randint(1, 12))
+                shade = rng.choice((0, 60, 127, 128, 200, 255))
+                for y in range(y0, y1):
+                    for x in range(x0, x1):
+                        jitter = rng.randint(-14, 14)
+                        data[y * width + x] = max(0, min(255, shade + jitter))
+            choice = rng.random()
+            if choice < 0.05:
+                model.reset(now=float(step), wall=float(step))
+            elif choice < 0.2 and model.result is not None:
+                model.reset_area(
+                    rng.randrange(width * scale),
+                    rng.randrange(height * scale),
+                    rng.randint(1, 20 * scale),
+                    rng.randint(1, 20 * scale),
+                    now=float(step),
+                    wall=float(step),
+                )
+            else:
+                model.sample(bytes(data), now=float(step), wall=float(step))
+            assert (
+                model._counts,
+                model._sums,
+                model._light_counts,
+                model._light_sums,
+            ) == recomputed_stats(model)
+            for index in range(width * height):
+                assert model.error[index] == (
+                    model._shown[index] - model._previous[index]
+                )
+
+
+def test_flashing_an_element_clears_it_on_a_scaled_screen():
+    # 48x36 model pixels for a 2200x1650 screen (45.8 screen pixels each):
+    # the element rectangle must map back onto exactly its model pixels.
+    model = GhostModel(
+        48, 36, 2200, 1650, columns=4, min_cell_pixels=4, min_cell_fraction=0.0
+    )
+    model.sample(frame(48, 36), now=0.0, wall=0.0)
+    model.sample(frame(48, 36, 255, (3, 4, 9, 11, 0)), now=1.0, wall=1.0)
+    erased = model.sample(frame(48, 36), now=2.0, wall=2.0)
+    (element,) = erased.elements
+
+    cleared = model.reset_area(
+        element.x, element.y, element.width, element.height, now=3.0, wall=3.0
+    )
+
+    assert cleared.elements == ()
+    assert cleared.level == 0
+    assert model.sample(frame(48, 36), now=4.0, wall=4.0).elements == ()
+
+
+def test_elements_cover_the_residue_not_whole_cells():
+    model = make_model()  # 8-pixel cells
+    model.sample(frame(32, 32), now=0.0, wall=0.0)
+    model.sample(frame(32, 32, 255, (2, 3, 6, 7, 0)), now=1.0, wall=1.0)
+
+    (element,) = model.sample(frame(32, 32), now=2.0, wall=2.0).elements
+
+    assert (element.x, element.y, element.width, element.height) == (2, 3, 4, 4)
+
+
+def test_content_drawn_during_a_flash_is_clean_afterwards():
+    model = make_model()
+    model.sample(frame(32, 32), now=0.0, wall=0.0)
+    model.sample(frame(32, 32, 255, (0, 0, 8, 8, 0)), now=1.0, wall=1.0)
+    model.sample(frame(32, 32), now=2.0, wall=2.0)
+
+    model.reset_area(0, 0, 8, 8, now=3.0, wall=3.0)
+    # A dark box appears under the overlay before the next sample: the
+    # flash ended on it, so it is not a fresh light ghost.
+    after = model.sample(
+        frame(32, 32, 255, (0, 0, 8, 8, 0)), now=4.0, wall=4.0
+    )
+
+    assert after.elements == ()
+    # Outside a flashed area the same drawing still leaves its residue.
+    later = model.sample(
+        frame(32, 32, 255, (0, 0, 8, 8, 0), (16, 16, 24, 24, 0)),
+        now=5.0,
+        wall=5.0,
+    )
+    assert [(item.x, item.y) for item in later.elements] == [(16, 16)]
+
+
+def test_changes_within_the_noise_keep_the_error_and_follow_the_content():
+    model = make_model()
+    model.sample(frame(32, 32), now=0.0, wall=0.0)
+    model.sample(frame(32, 32, 255, (0, 0, 16, 16, 0)), now=1.0, wall=1.0)
+    before = model.sample(frame(32, 32), now=2.0, wall=2.0)
+    level = model.error[0]
+    assert level < 0
+
+    # A slow fade in steps below the noise: no new residue, same error.
+    for step, shade in enumerate((250, 245, 240, 235, 230), start=3):
+        model.sample(frame(32, 32, shade), now=float(step), wall=float(step))
+        assert model.error[0] == level
+        assert model._shown[0] == shade + level
+
+    after = model.sample(frame(32, 32, 230), now=9.0, wall=9.0)
+    assert after.level == before.level
+
+
+def test_version_moves_only_when_the_estimate_can_change():
+    model = make_model()
+    model.sample(frame(32, 32), now=0.0, wall=0.0)
+    start = model.version
+
+    model.sample(frame(32, 32), now=1.0, wall=1.0)
+    assert model.version == start
+
+    model.sample(frame(32, 32, 255, (0, 0, 4, 4, 0)), now=2.0, wall=2.0)
+    assert model.version > start
+    moved = model.version
+    model.reset_area(0, 0, 4, 4, now=3.0, wall=3.0)
+    assert model.version > moved
+
+
 def test_reset_area_requires_a_positive_rectangle():
     model = make_model()
     with pytest.raises(ValueError):
@@ -257,6 +416,8 @@ def test_frame_size_and_options_are_validated():
         GhostModel(32, 32, 32, 32, gamma_erase=101)
     with pytest.raises(ValueError):
         GhostModel(32, 32, 32, 32, noise=256)
+    with pytest.raises(ValueError):
+        GhostModel(32, 32, 32, 32, min_error=0)
 
 
 def test_preview_shows_the_ghost_and_its_box():
@@ -585,6 +746,99 @@ def test_watcher_backs_off_while_nothing_changes():
     clock.advance(7.0)
     assert watcher.due() is False
     clock.advance(1.0)
+    assert watcher.due() is True
+
+
+class TrackingCapturer(FakeCapturer):
+    """A capture that reports changes, like X11 damage or Wayland frames."""
+
+    def __init__(self, frames=()):
+        super().__init__(frames)
+        self.changed = False
+        self.full_requests = 0
+
+    def poll_changes(self):
+        return self.changed
+
+    def grab(self, width):
+        self.changed = False
+        return super().grab(width)
+
+    def request_full(self):
+        self.full_requests += 1
+
+
+def test_watcher_with_change_reports_samples_only_after_changes():
+    clock = FakeClock()
+    capturer = TrackingCapturer(ghost_frames()[:1])
+    watcher = make_watcher(capturer, clock, max_interval=30.0)
+
+    assert watcher.due() is True  # the first sample is always due
+    watcher.sample()
+    clock.advance(10.0)
+    assert watcher.due() is False  # a still screen costs nothing
+
+    capturer.changed = True
+    assert watcher.due() is True
+    watcher.sample()
+    capturer.changed = True
+    clock.advance(1.0)
+    assert watcher.due() is False  # changes wait for the base interval
+    clock.advance(1.0)
+    assert watcher.due() is True
+
+
+def test_watcher_with_change_reports_runs_a_full_heartbeat():
+    clock = FakeClock()
+    capturer = TrackingCapturer(ghost_frames()[:1])
+    watcher = make_watcher(capturer, clock, max_interval=30.0)
+    watcher.sample()
+
+    clock.advance(29.0)
+    assert watcher.due() is False
+    clock.advance(1.0)
+    assert watcher.due() is True
+    watcher.sample()
+
+    assert capturer.full_requests == 1
+    clock.advance(2.0)
+    assert watcher.due() is False
+
+
+def test_watcher_keeps_the_base_cadence_while_the_window_is_open():
+    clock = FakeClock()
+    capturer = TrackingCapturer(ghost_frames()[:1])
+    watcher = make_watcher(capturer, clock)
+    watcher.sample()
+    watcher.set_force_base(True)
+
+    clock.advance(2.0)
+
+    assert watcher.due() is True
+
+
+def test_watcher_requested_sample_skips_the_wait():
+    clock = FakeClock()
+    capturer = TrackingCapturer(ghost_frames()[:1])
+    watcher = make_watcher(capturer, clock)
+    watcher.sample()
+
+    watcher.request_sample()
+
+    assert watcher.due() is True
+    watcher.sample()
+    assert watcher.due() is False
+
+
+def test_watcher_without_change_reports_keeps_the_timer():
+    clock = FakeClock()
+    capturer = TrackingCapturer(ghost_frames()[:1])
+    capturer.poll_changes = lambda: None  # the capture cannot tell
+    watcher = make_watcher(capturer, clock, max_interval=8.0)
+    watcher.sample()
+
+    clock.advance(4.0)
+
     assert watcher.due() is True
 
 

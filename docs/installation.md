@@ -67,11 +67,13 @@ from the project virtualenv.
 
 The same library lets the estimate auto-detect the Dasung among several
 monitors, because Gdk only reports the RandR output name (`DP-1`) while the
-EDID carries the model. Without it the estimate still works, just without
-application names, and on multi-monitor X11 `ghost.output` must name the
-output seen in `xrandr`. On KDE Wayland the labels come from KWin scripting
-and need no extra package; the panel-presence check reads `/sys/class/drm`
-there.
+EDID carries the model, and it reads the captured region with a direct
+`XGetImage` (the GTK grab reads the whole scaled desktop, which costs much
+more per sample). Without it the estimate still works, just without
+application names and with the slower grab; on multi-monitor X11
+`ghost.output` must name the output seen in `xrandr`. On KDE Wayland the
+labels come from KWin scripting and need no extra package; the
+panel-presence check reads `/sys/class/drm` there.
 
 ## GTK 3 and Ayatana AppIndicator
 
@@ -176,6 +178,11 @@ systemctl status brltty
 journalctl -u brltty
 journalctl -k --grep='ttyUSB\|ch34'
 ```
+
+With the monitor connected, the desktop needs a few settings of its own to
+show crisp text: grayscale antialiasing, no fractional upscaling, a
+suitable hinting. They are collected in
+[docs/rendering.md](rendering.md).
 
 ## Development environment
 

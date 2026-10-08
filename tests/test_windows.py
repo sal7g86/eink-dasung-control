@@ -235,6 +235,19 @@ def test_x11_zones_skip_unmapped_windows(monkeypatch):
     assert [zone.app for zone in zones] == ["konsole"]
 
 
+def test_x11_zones_convert_device_coordinates(monkeypatch):
+    # A doubled GTK scale (Cinnamon scale-ui-down): EWMH reports device
+    # pixels while the estimate works in application pixels.
+    windows = [FakeWindow(1, "konsole", 7520, 1162, 2512, 1820)]
+    connection = FakeConnection(windows, stacking=[1])
+    install_fake_xlib(monkeypatch, connection)
+
+    zones = X11Zones(scale=2).zones(3760, 549, 1256, 942)
+
+    assert [(zone.app, zone.x, zone.y) for zone in zones] == [("konsole", 0, 32)]
+    assert (zones[0].width, zones[0].height) == (1256, 910)
+
+
 # -- KWinZones without a compositor -------------------------------------------
 
 

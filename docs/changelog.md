@@ -3,6 +3,78 @@
 All notable changes to this project are documented in this file. The format
 follows Keep a Changelog, and versions use semantic versioning.
 
+## 0.1.5 — 2026-10-08
+
+An About window and the e-ink icon, scaled X11 desktops, and a ghost
+estimate that samples when the screen changes, with far less CPU and
+tighter, more precise areas.
+
+### Added
+
+- **`About…` in the tray menu**: the last group before `Quit` opens a window
+  with the running version, the monitor profile (`Model`, `Protocol`,
+  `Refresh rate`), the serial port, the Python, GTK and PyGObject versions
+  with the session type, and the configuration, state and log paths.
+  Opening it never talks to the monitor.
+- **E-ink rendering guide** (`docs/rendering.md`): grayscale antialiasing,
+  avoiding fractional upscaling, hinting and text-size choices for e-ink
+  panels, with the commands to verify them.
+
+### Changed
+
+- **The ghost estimate samples when the screen changes**: on X11 (with
+  `python-xlib`) it follows the DAMAGE reports of the windows and re-reads
+  only the changed blocks of the monitor; on Wayland it samples when the
+  stream delivers a frame. A still screen costs no capture apart from a full
+  check every `ghost.max_interval`, and a change no longer waits for the
+  idle backoff. Without change reports the timer works as before.
+- **Much less CPU for the ghost estimate**: the model visits only the
+  changed rows and segments and keeps its statistics by difference (a typed
+  line costs ~0.1 ms instead of ~10 ms), the grey conversion runs in
+  GdkPixbuf (~1 ms instead of ~18), the preview is redrawn only when the
+  estimate changed, and the Wayland stream no longer converts and scales
+  every frame at full resolution (about 1% of a core instead of ~35% at
+  40 fps of changes, measured with a test source). A whole-frame change
+  costs somewhat more than before (46 ms instead of 33 at 480×360). With an
+  active terminal on the panel the sampling loop went from 4.6% to 1.6% of a
+  core.
+- **Tighter clearing areas**: an estimated area is the bounding box of its
+  ghost pixels instead of whole 16-column cells, so a flash rewrites less of
+  the panel.
+- The X11 grey conversion uses luminance weights (0.30/0.59/0.11) instead
+  of (R+2G+B)/4; grey content is unchanged.
+- The project icon is now an e-ink monitor (paper screen with ink text
+  lines and an ink drop) and both the tray and the `About…` window use it;
+  the desktop theme's monitor icon is only a fallback now.
+- The README animation and screenshots still refer to version 0.1 and do
+  not show the `About…` entry or the new icon.
+
+### Fixed
+
+- **Wayland ghost estimate on thin text**: the stream was reduced with a
+  two-tap filter that skipped thin strokes, so text flickered in and out of
+  the model and scrolling produced false ghosts; it now averages every
+  screen pixel under a model pixel, like the X11 reduction. A still panel
+  also no longer makes a sample wait about a second for a frame.
+- **Content drawn during a zone flash is no longer a ghost**: the sample
+  after a flash takes the content then shown under the flashed areas as
+  clean, and the tray takes that sample right away.
+- A change within the capture noise now moves the panel estimate together
+  with the content, so the model's `E = A - S` stays exact.
+- The ghost preview colours residue by the current content, the same rule
+  the estimate counts it with.
+- The X11 monitor matching now follows the session's GTK window scale:
+  with an integer-scaled desktop (Cinnamon's fractional scaling in
+  `scale-ui-down` mode, a doubled UI elsewhere) the panel-presence check
+  reported the monitor as off, so the tray never talked to the serial
+  port, the automatic capture could not find the panel, and the window
+  labels were off by the scale factor.
+- The X11 ghost capture reads the monitor region with `XGetImage` when
+  `python-xlib` is installed, instead of the full-desktop GTK grab: on a
+  large integer-scaled desktop the GTK route cost about a second of X
+  server CPU per sample, whatever rectangle was asked for. The GTK grab
+  stays as the fallback without the binding.
+
 ## 0.1.4 — 2026-10-07
 
 Wayland parity for the ghost estimate and window handling, one launcher

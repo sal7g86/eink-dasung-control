@@ -9,20 +9,25 @@ forms a cycle.
 
 from __future__ import annotations
 
+import os
+import platform
 import time
 
+from . import __version__, paths
 from .client import MonitorInfo
 from .ghostwatch import GhostResult, format_age
 from .panels import get_panel
 from .tray import (
     CLEAR_TOOLTIPS,
     GHOST_PREVIEW_WIDTH,
+    ICON_FALLBACKS,
     ICON_INFO,
     INTERVAL_CHOICES,
     SCALE_APPLY_DELAY_MS,
     SCALE_STEPS,
     TrayApp,
     icon_name,
+    icon_path,
     interval_label,
     status_symbol,
 )
@@ -52,6 +57,42 @@ WINDOW_CSS = """
 }
 .dasung-ok {
     color: #2ec27e;
+}
+/* About window: a centered hero over flat sections with hairline
+   separators, so the content reads as a page instead of boxes. */
+.dasung-about-name {
+    font-size: 1.7em;
+    font-weight: bold;
+}
+.dasung-about-version {
+    background-color: alpha(@theme_fg_color, 0.08);
+    border-radius: 20px;
+    padding: 2px 10px;
+    font-size: 0.85em;
+}
+.dasung-about-title {
+    font-size: 0.85em;
+    font-weight: bold;
+    opacity: 0.55;
+}
+.dasung-about-row {
+    padding: 3px 0;
+    border-bottom: 1px solid alpha(@theme_fg_color, 0.10);
+}
+.dasung-about-label {
+    opacity: 0.75;
+}
+.dasung-about-path {
+    font-family: monospace;
+    font-size: 0.9em;
+}
+.dasung-about-link {
+    background-color: alpha(@theme_fg_color, 0.07);
+    border-radius: 20px;
+    padding: 6px 14px;
+}
+.dasung-about-link:hover {
+    background-color: alpha(@theme_fg_color, 0.12);
 }
 """
 
@@ -693,6 +734,8 @@ class GhostWindow:
         self.Gtk = Gtk
         self._mapped_once = False
         self._signature = None
+        # Model identity and version of the preview on screen.
+        self._preview_key = None
         # Guards the switch's notify::active while the view mirrors the state.
         self._clear_updating = False
         # Pending debounce of the clearing-settings editor.
@@ -1109,7 +1152,7 @@ class GhostWindow:
             self._set(self.detail, "")
             self._set(self.elements, "")
             self._set(self.status, "")
-            self.preview.clear()
+            self._clear_preview()
             self._sync_clear_controls(None)
             self._sync_estimate_controls(None)
             return
@@ -1147,7 +1190,7 @@ class GhostWindow:
                 self._set(self.summary, "Waiting for the first sample…")
                 self._set(self.detail, "")
                 self._set(self.elements, "")
-            self.preview.clear()
+            self._clear_preview()
         else:
             count = len(result.elements)
             areas = "area" if count == 1 else "areas"
@@ -1171,13 +1214,23 @@ class GhostWindow:
         self._sync_estimate_controls(watcher)
         self._show_status(watcher)
 
+    def _clear_preview(self) -> None:
+        self._preview_key = None
+        self.preview.clear()
+
     def _show_preview(self, watcher, result: GhostResult) -> None:
         model = watcher.model
         if model is None:
-            self.preview.clear()
+            self._clear_preview()
             return
         width = GHOST_PREVIEW_WIDTH
         height = max(1, round(width * model.height / model.width))
+        # Rendering the preview is pure Python: redo it only when the model
+        # moved (a sample without changes leaves `version` alone).
+        key = (id(model), model.version, width, height)
+        if key == self._preview_key:
+            return
+        self._preview_key = key
         rgb = model.preview_rgb(width, height)
         pixbuf = self.app.GdkPixbuf.Pixbuf.new_from_bytes(
             self.app.GLib.Bytes.new(rgb),
@@ -1247,3 +1300,327 @@ class GhostWindow:
 
         if label.get_text() != text:
             label.set_text(text)
+
+
+ABOUT_DESCRIPTION = (
+    "System-tray control and diagnostics for Dasung Paperlike e-ink "
+    "monitors over a CH340 serial port"
+)
+ABOUT_HOMEPAGE = "https://github.com/sal7g86/eink-dasung-control"
+ABOUT_LICENSE = "Apache License 2.0 — © 2026 sal7g86"
+
+
+def version_text() -> str:
+    """The version pill under the program name."""
+
+    return f"version {__version__}"
+
+
+def _availability(controller) -> str:
+    """Human wording for the tray's monitor reachability tri-state."""
+
+    if controller.monitor_available is True:
+        return "available"
+    if controller.monitor_available is False:
+        return "unavailable"
+    return "not checked yet"
+
+
+def about_sections(controller, runtime, files):
+    """The About window's text sections as `(title, ((label, value), ...))`.
+
+    Pure data (no GTK) so the content stays testable: `runtime` carries the
+    versions probed from the loaded bindings and `files` the visible paths.
+    """
+
+    panel = controller.panel
+    return (
+        (
+            "Monitor",
+            (
+                ("Model", panel.name),
+                ("Protocol", f"0x{panel.protocol:02X}"),
+                ("Refresh rate", f"{panel.refresh_hz} Hz"),
+                ("Serial port", controller.device),
+                ("Availability", _availability(controller)),
+            ),
+        ),
+        (
+            "Runtime",
+            (
+                ("Python", runtime["python"]),
+                ("GTK", runtime["gtk"]),
+                ("PyGObject", runtime["pygobject"]),
+                ("Session", runtime["session"]),
+            ),
+        ),
+        (
+            "Files",
+            (
+                ("Configuration", files["config"]),
+                ("Last state", files["state"]),
+                ("Log", files["log"]),
+            ),
+        ),
+    )
+
+
+def _session_label(Gdk) -> str:
+    """`X11`/`Wayland` plus the display name, from the environment if set."""
+
+    display = Gdk.Display.get_default()
+    name = display.get_name() if display is not None else None
+    kind = (os.environ.get("XDG_SESSION_TYPE") or "").lower()
+    if kind not in ("x11", "wayland"):
+        if name is None:
+            kind = ""
+        elif name.startswith("wayland"):
+            kind = "wayland"
+        elif name.startswith(":"):
+            kind = "x11"
+    label = {"x11": "X11", "wayland": "Wayland"}.get(kind, kind or "unknown")
+    return f"{label} ({name})" if name else label
+
+
+class AboutWindow:
+    """Informational window: version, monitor, runtime and file paths.
+
+    A centered hero over flat sections, so the content reads as a page
+    instead of a stack of boxes; only the monitor availability is refreshed
+    on every `update()`. Opening it never touches the serial port: every
+    value comes from the loaded bindings or the tray's own state.
+    """
+
+    def __init__(self, app: TrayApp) -> None:
+        """Build the window; nothing here talks to the monitor."""
+
+        Gtk = app.Gtk
+        self.app = app
+        self.Gtk = Gtk
+        self._mapped_once = False
+        self._value_labels: dict[str, object] = {}
+        install_window_css(app.Gtk, app.Gdk)
+
+        window = Gtk.Window(title="About dasungctl")
+        # Width fixed, height driven by the content, so every section is
+        # visible at once and the window is exactly as tall as it needs.
+        # The minimum width matters: GTK computes the minimum height at the
+        # narrowest possible width, where the file paths wrap into many
+        # lines, and without the floor the window grows past its natural
+        # height. -1 keeps the natural height.
+        window.set_size_request(500, -1)
+        window.set_default_size(500, -1)
+        window.connect("delete-event", self._on_delete)
+        self.window = window
+
+        header = Gtk.HeaderBar()
+        header.set_show_close_button(True)
+        window.set_titlebar(header)
+        # GTK clears the window title when a custom titlebar is set (3.24):
+        # put it back for the WM, the window list and Alt+Tab.
+        window.set_title("About dasungctl")
+
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        content.set_border_width(12)
+        window.add(content)
+
+        # No ScrolledWindow here: one would not propagate the wrapped
+        # labels' height-for-width, and this page is small and static. The
+        # window sizes itself to the content; every section is visible at
+        # once on the tested screens.
+        body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        body.set_margin_end(4)
+        content.pack_start(body, False, False, 0)
+
+        body.pack_start(self._hero(), False, False, 0)
+
+        runtime = {
+            "python": platform.python_version(),
+            "gtk": "{}.{}.{}".format(
+                Gtk.get_major_version(),
+                Gtk.get_minor_version(),
+                Gtk.get_micro_version(),
+            ),
+            "pygobject": getattr(app.gi, "__version__", "unknown"),
+            "session": _session_label(app.Gdk),
+        }
+        files = {
+            "config": str(paths.config_path()),
+            "state": str(paths.last_state_path()),
+            "log": str(paths.log_path()),
+        }
+        for section_title, rows in about_sections(app.controller, runtime, files):
+            body.pack_start(
+                self._section(section_title, rows), False, False, 0
+            )
+
+        content.pack_start(self._footer(), False, False, 0)
+
+    # -- widget helpers ----------------------------------------------------
+
+    def _hero(self):
+        """Centered icon, name, version pill and description."""
+
+        Gtk = self.Gtk
+        hero = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        hero.set_margin_top(12)
+        hero.set_margin_bottom(12)
+        hero.pack_start(self._program_icon(), False, False, 0)
+        name = Gtk.Label(label="dasungctl")
+        name.get_style_context().add_class("dasung-about-name")
+        hero.pack_start(name, False, False, 0)
+        version = Gtk.Label(label=version_text())
+        version.get_style_context().add_class("dasung-about-version")
+        version.set_halign(Gtk.Align.CENTER)
+        hero.pack_start(version, False, False, 0)
+        description = Gtk.Label(label=ABOUT_DESCRIPTION)
+        description.set_line_wrap(True)
+        description.set_justify(Gtk.Justification.CENTER)
+        description.set_max_width_chars(56)
+        description.get_style_context().add_class("dasung-subtitle")
+        hero.pack_start(description, False, False, 0)
+        return hero
+
+    def _program_icon(self):
+        """The project icon at hero size, theme icon as fallback."""
+
+        Gtk = self.Gtk
+        image = Gtk.Image()
+        image.set_halign(Gtk.Align.CENTER)
+        bitmap = icon_path()
+        if bitmap.exists():
+            image.set_from_pixbuf(
+                self.app.GdkPixbuf.Pixbuf.new_from_file_at_size(
+                    str(bitmap), 72, 72
+                )
+            )
+            return image
+        name = icon_name(Gtk, ICON_FALLBACKS)
+        if name is not None:
+            image.set_from_icon_name(name, Gtk.IconSize.DIALOG)
+            image.set_pixel_size(72)
+        return image
+
+    def _section(self, title: str, rows):
+        """Flat section: a small heading over label/value rows."""
+
+        Gtk = self.Gtk
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        box.set_margin_top(10)
+        heading = Gtk.Label(label=title.upper(), xalign=0)
+        heading.get_style_context().add_class("dasung-about-title")
+        heading.set_margin_bottom(2)
+        box.pack_start(heading, False, False, 0)
+        for label, value in rows:
+            box.pack_start(
+                self._row(label, value, path=title == "Files"),
+                False,
+                False,
+                0,
+            )
+        return box
+
+    def _row(self, label: str, value: str, *, path: bool = False):
+        """Label + selectable value row, closed by a hairline separator."""
+
+        Gtk = self.Gtk
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        row.get_style_context().add_class("dasung-about-row")
+        name = Gtk.Label(label=label, xalign=0)
+        name.set_size_request(105, -1)
+        name.get_style_context().add_class("dasung-about-label")
+        text = Gtk.Label(label=value, xalign=1)
+        text.set_selectable(True)
+        # Selectable labels are focusable, and focusing one selects its whole
+        # text: without this the first value opens highlighted. Mouse
+        # selection and copy keep working without keyboard focus.
+        text.set_can_focus(False)
+        text.set_line_wrap(True)
+        if path:
+            text.get_style_context().add_class("dasung-about-path")
+        self._value_labels[label] = text
+        row.pack_start(name, False, False, 0)
+        row.pack_start(text, True, True, 0)
+        return row
+
+    def _footer(self):
+        """Centered homepage pill and license line."""
+
+        Gtk = self.Gtk
+        footer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        footer.set_margin_top(12)
+        footer.set_margin_bottom(4)
+        link = Gtk.Button()
+        link.set_relief(Gtk.ReliefStyle.NONE)
+        link.get_style_context().add_class("dasung-about-link")
+        link.set_halign(Gtk.Align.CENTER)
+        link.set_tooltip_text(ABOUT_HOMEPAGE)
+        link.connect("clicked", self._on_homepage)
+        inner = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        icon = icon_name(
+            Gtk,
+            (
+                "link-symbolic",
+                "applications-internet-symbolic",
+                "network-workgroup-symbolic",
+            ),
+        )
+        if icon is not None:
+            inner.pack_start(
+                Gtk.Image.new_from_icon_name(icon, Gtk.IconSize.MENU),
+                False,
+                False,
+                0,
+            )
+        inner.pack_start(Gtk.Label(label="Project homepage"), False, False, 0)
+        link.add(inner)
+        footer.pack_start(link, False, False, 0)
+        license_label = Gtk.Label(label=ABOUT_LICENSE)
+        license_label.get_style_context().add_class("dasung-subtitle")
+        footer.pack_start(license_label, False, False, 0)
+        return footer
+
+    def _on_homepage(self, _button) -> None:
+        """Open the project page in the user's browser."""
+
+        self.Gtk.show_uri_on_window(
+            self.window, ABOUT_HOMEPAGE, self.Gtk.get_current_event_time()
+        )
+
+    # -- view updates ------------------------------------------------------
+
+    def present(self) -> None:
+        """First show reveals every widget; later calls raise the window."""
+
+        if not self._mapped_once:
+            self.window.show_all()
+            self._mapped_once = True
+        else:
+            _bring_to_current_desktop(self.window, self.app)
+        self.window.present()
+
+    def update(self) -> None:
+        """Refresh the monitor availability wording and its colour."""
+
+        label = self._value_labels.get("Availability")
+        if label is None:
+            return
+        text = _availability(self.app.controller)
+        if label.get_text() != text:
+            label.set_text(text)
+        context = label.get_style_context()
+        for css_class, wanted in (
+            ("dasung-ok", text == "available"),
+            ("dasung-error", text == "unavailable"),
+        ):
+            if context.has_class(css_class) != wanted:
+                if wanted:
+                    context.add_class(css_class)
+                else:
+                    context.remove_class(css_class)
+
+    def _on_delete(self, *_args):
+        """Hide the window instead of destroying it: reopening is instant."""
+
+        self.window.hide()
+        return True

@@ -147,13 +147,16 @@ cp konsole-eink/konsole-eink.colorscheme ~/.local/share/konsole/
 ```
 
 Then choose `E-Ink Color Scheme` in Konsole's profile settings. The theme is
-a separate project and is not part of this repository.
+a separate project and is not part of this repository. The system-wide
+rendering settings (grayscale antialiasing, desktop scaling, hinting) are
+collected in [docs/rendering.md](docs/rendering.md).
 
 ## Documentation
 
 | Document | Contents |
 | --- | --- |
 | [docs/installation.md](docs/installation.md) | environment, packages, serial permissions |
+| [docs/rendering.md](docs/rendering.md) | e-ink rendering: grayscale, scaling, hinting |
 | [docs/tray.md](docs/tray.md) | menu, windows, physical controls, scope |
 | [docs/configuration.md](docs/configuration.md) | config, saved state and log files |
 | [docs/panels.md](docs/panels.md) | panel profiles and how to add another model |
@@ -165,7 +168,7 @@ a separate project and is not part of this repository.
 
 ## Status
 
-0.1.4, alpha. Monitor control is conservative and verified against the
+0.1.5, alpha. Monitor control is conservative and verified against the
 recorded captures; the ghost estimate is experimental and still needs
 calibration on the panel. See [docs/ghost-estimate.md](docs/ghost-estimate.md)
 for the known limitations.

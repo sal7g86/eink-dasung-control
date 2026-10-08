@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Project icon: an e-ink monitor. Paper-white screen with ink text lines
+     and one ink drop; two-tone (dark frame + paper) with a light keyline so
+     it stays readable on light and dark panels even at tray size.
+     Hand-editable source: the PNG next to this file is generated from it
+     with Inkscape, exported at 256 pixels wide on a transparent background. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <rect x="20" y="30" width="216" height="152" rx="18" fill="#39414f" stroke="#e8e6df" stroke-opacity="0.45" stroke-width="3"/>
+  <rect x="34" y="44" width="188" height="124" rx="9" fill="#f3f0e7"/>
+  <rect x="52" y="66" width="104" height="14" rx="7" fill="#39414f"/>
+  <rect x="52" y="92" width="136" height="14" rx="7" fill="#39414f"/>
+  <rect x="52" y="118" width="82" height="14" rx="7" fill="#39414f"/>
+  <path d="M196 126 c0 0 -13 19 -13 25 a13 13 0 0 0 26 0 c0 -6 -13 -25 -13 -25 z" fill="#3f5d8f"/>
+  <rect x="114" y="182" width="28" height="28" fill="#39414f" stroke="#e8e6df" stroke-opacity="0.45" stroke-width="3"/>
+  <rect x="86" y="206" width="84" height="16" rx="8" fill="#39414f" stroke="#e8e6df" stroke-opacity="0.45" stroke-width="3"/>
+</svg>

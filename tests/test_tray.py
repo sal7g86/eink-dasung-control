@@ -2,15 +2,18 @@
 
 from contextlib import nullcontext
 import signal
+import struct
 import sys
 import threading
 import time
 import types
 
+from dasungctl import __version__
 from dasungctl.config import Config
 from dasungctl.errors import SEVERITY_ERROR, SEVERITY_WARN, SEVERITY_WORKING
 from dasungctl.ghostwatch import GhostElement, GhostResult
 from dasungctl.logfile import NullLog
+from dasungctl.panels import DEFAULT_PANEL
 from dasungctl.protocol import CUSTOM_FRONTLIGHT_MODE, FrontlightMode
 from dasungctl.state import StateError
 from dasungctl.zoneclear import DEFAULT_CLEAR
@@ -31,6 +34,7 @@ from dasungctl.tray import (
     autostart_path,
     frontlight_label,
     gdk_noise,
+    icon_path,
     install_appindicator_log_filter,
     install_gdk_log_filter,
     launcher_path,
@@ -43,7 +47,13 @@ from dasungctl.tray import (
     write_launcher,
 )
 from dasungctl.transport import REASON_LOCKED, TransportError
-from dasungctl.tray_windows import _bring_to_current_desktop, _value_text
+from dasungctl.tray_windows import (
+    _bring_to_current_desktop,
+    _session_label,
+    _value_text,
+    about_sections,
+    version_text,
+)
 
 from fakes import RESPONSES, FakeTransport
 
@@ -1128,6 +1138,152 @@ def test_menu_presets_stay_within_range_and_on_the_step_grid():
     )
     assert all(0 <= value <= 255 for value in TEMPERATURE_LEVELS)
     assert list(TEMPERATURE_LEVELS) == sorted(TEMPERATURE_LEVELS, reverse=True)
+
+
+def _about_controller(**overrides):
+    """The pieces about_sections() reads from the TrayController."""
+
+    values = {
+        "panel": DEFAULT_PANEL,
+        "device": "auto",
+        "monitor_available": None,
+    }
+    values.update(overrides)
+    return types.SimpleNamespace(**values)
+
+
+def _about_data():
+    runtime = {
+        "python": "3.12.3",
+        "gtk": "3.24.41",
+        "pygobject": "3.50.0",
+        "session": "X11 (:0)",
+    }
+    files = {
+        "config": "/home/u/.config/dasungctl/config.json",
+        "state": "/home/u/.local/state/dasungctl/last-state.json",
+        "log": "/home/u/.local/state/dasungctl/dasungctl.log",
+    }
+    return runtime, files
+
+
+def test_about_sections_report_monitor_runtime_and_files():
+    runtime, files = _about_data()
+    sections = {
+        title: dict(rows)
+        for title, rows in about_sections(
+            _about_controller(device="/dev/ttyUSB0", monitor_available=False),
+            runtime,
+            files,
+        )
+    }
+
+    assert sections["Monitor"]["Model"] == DEFAULT_PANEL.name
+    assert sections["Monitor"]["Protocol"] == f"0x{DEFAULT_PANEL.protocol:02X}"
+    assert sections["Monitor"]["Serial port"] == "/dev/ttyUSB0"
+    assert sections["Monitor"]["Availability"] == "unavailable"
+    assert sections["Runtime"]["PyGObject"] == "3.50.0"
+    assert sections["Files"]["Log"] == files["log"]
+
+
+def test_version_text_shows_the_package_version():
+    assert version_text() == f"version {__version__}"
+
+
+def test_set_icon_prefers_the_bundled_asset():
+    app = TrayApp.__new__(TrayApp)
+    calls = []
+    indicator = types.SimpleNamespace(
+        set_icon_full=lambda *args: calls.append(args)
+    )
+
+    app._set_icon(indicator)
+
+    assert calls == [(str(icon_path()), "DASUNG e-ink monitor")]
+
+
+def test_set_icon_falls_back_to_the_theme_without_the_asset(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(
+        "dasungctl.tray.icon_path", lambda: tmp_path / "missing.png"
+    )
+    theme = types.SimpleNamespace(
+        lookup_icon=lambda name, size, flags: (
+            object() if name == "video-display-symbolic" else None
+        )
+    )
+    app = TrayApp.__new__(TrayApp)
+    app.Gtk = types.SimpleNamespace(
+        IconTheme=types.SimpleNamespace(get_default=lambda: theme)
+    )
+    calls = []
+    indicator = types.SimpleNamespace(
+        set_icon_full=lambda *args: calls.append(args)
+    )
+
+    app._set_icon(indicator)
+
+    assert calls == [("video-display-symbolic", "DASUNG monitor")]
+
+
+def test_bundled_icon_is_a_full_size_png():
+    data = icon_path().read_bytes()
+
+    assert data[:8] == b"\x89PNG\r\n\x1a\n"
+    width, height = struct.unpack(">II", data[16:24])
+    # The About hero draws it at 72 px: a smaller source would be upscaled.
+    assert (width, height) == (256, 256)
+
+
+def test_about_availability_covers_available_and_unknown():
+    runtime, files = _about_data()
+    for available, expected in ((True, "available"), (None, "not checked yet")):
+        sections = {
+            title: dict(rows)
+            for title, rows in about_sections(
+                _about_controller(monitor_available=available), runtime, files
+            )
+        }
+        assert sections["Monitor"]["Availability"] == expected
+
+
+class _FakeDisplay:
+    def __init__(self, name):
+        self._name = name
+
+    def get_name(self):
+        return self._name
+
+
+def _fake_gdk(name):
+    return types.SimpleNamespace(
+        Display=types.SimpleNamespace(
+            get_default=lambda: _FakeDisplay(name)
+        )
+    )
+
+
+def test_session_label_prefers_the_session_environment(monkeypatch):
+    monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+    assert _session_label(_fake_gdk("wayland-0")) == "Wayland (wayland-0)"
+
+    monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
+    assert _session_label(_fake_gdk(":0")) == "X11 (:0)"
+
+
+def test_session_label_falls_back_to_the_display_name(monkeypatch):
+    monkeypatch.delenv("XDG_SESSION_TYPE", raising=False)
+    assert _session_label(_fake_gdk("wayland-0")) == "Wayland (wayland-0)"
+    assert _session_label(_fake_gdk(":0")) == "X11 (:0)"
+
+
+def test_session_label_without_a_display_is_unknown(monkeypatch):
+    monkeypatch.delenv("XDG_SESSION_TYPE", raising=False)
+    gdk = types.SimpleNamespace(
+        Display=types.SimpleNamespace(get_default=lambda: None)
+    )
+    assert _session_label(gdk) == "unknown"
 
 
 def test_frontlight_levels_match_the_measured_scale():

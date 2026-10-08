@@ -54,6 +54,13 @@ Both windows remain on the workspace where they are opened; choosing one
 again from the menu moves it to the workspace in use (on KDE Wayland the
 tray asks KWin; on other compositors that choice belongs to the compositor).
 
+The last menu group holds `About…` and `Quit`: the About window shows the
+running version, the monitor profile (`Model`, `Protocol`, `Refresh rate`),
+the serial port (`auto` unless one is configured), the Python, GTK and
+PyGObject versions with the session type, and the configuration, state and
+log paths. Opening it never talks to the monitor, and the availability line
+follows the tray's reachability state each time the window is shown.
+
 The first menu row is the status line (`reloaded`, `monitor changed: …`,
 `auto-refresh on`, …). Failures are compressed to one short sentence —
 `monitor not found (off or unplugged?)`, `monitor not responding`,
@@ -70,7 +77,9 @@ unavailable. The second is the e-ink display output: the panel's HDMI
 receiver disappears when it is switched off, while the CH340 stays powered
 and keeps answering the stored values, so the output is the only confirmed
 way to tell "off" from "on". On X11 the check reads the Gdk monitors' EDID
-names through python-xlib; on Wayland it reads the connected DRM outputs in
+names through python-xlib, scaling the Gdk rectangles by the session's
+window scale (an integer-scaled desktop keeps matching); on Wayland it
+reads the connected DRM outputs in
 `/sys/class/drm` and matches the same names. The startup check is conclusive
 immediately; a later miss needs two in a row, so a display reconfiguration
 does not switch the automatic features off. Without python-xlib on X11,

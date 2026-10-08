@@ -53,10 +53,15 @@ so the tray asks KWin's scripting interface — the same route tools like
 window titles. When the label channel is unavailable, the areas keep their
 plain coordinates and the estimate window says why the query failed.
 
-While nothing changes the sampling interval doubles from `interval` up to
-`max_interval`, so an idle screen costs almost nothing; the first change, and
-an open `Ghost estimate…` window, return to the base cadence. The threshold line
-in the log can therefore be delayed up to `max_interval` after a change.
+Sampling follows the screen. When the capture can tell what changed — X11
+with `python-xlib` and the DAMAGE extension, and the Wayland stream, which
+only delivers frames when the output changes — a sample is taken as soon as
+the monitor changes, at most once per `interval`, and never while it stays
+still; a full check every `max_interval` catches anything a change report
+missed. Without change reports (the GTK fallback on X11) the interval
+doubles from `interval` up to `max_interval` while nothing changes and
+returns to the base cadence at the first change. An open `Ghost estimate…`
+window keeps the base cadence in both cases.
 
 ## The model
 
@@ -64,14 +69,21 @@ For each pixel the estimator keeps three values: `S`, the current screen
 content; `A`, what the panel is estimated to show; and the signed ghost error
 `E = A - S` (negative: darker than the content, positive: lighter).
 
-One sample walks the captured frame and, only where the content changed by
-more than `noise` (10 levels out of 255), moves `A` toward `S` by an
-efficiency `gamma` that depends on the direction: `gamma_ink` (90) when the
-pixel darkens, `gamma_erase` (80) when it lightens. The update never reaches
-`S` exactly, so part of `E` remains and stays there — untouched pixels keep
-their error — until the area is rewritten or the estimate is reset. `noise`,
-`min_error`, `gamma_ink` and `gamma_erase` are model assumptions, not user
-settings.
+Where the content changed by more than `noise` (10 levels out of 255), a
+sample moves `A` toward `S` by an efficiency `gamma` that depends on the
+direction: `gamma_ink` (90) when the pixel darkens, `gamma_erase` (80) when it
+lightens. The update never reaches `S` exactly, so part of `E` remains and
+stays there — untouched pixels keep their error — until the area is
+rewritten or the estimate is reset. A change within the noise is taken as
+followed exactly by the panel: `A` moves with `S`, `E` stays as it was, so
+`E = A - S` holds for every pixel at all times. `noise`, `min_error`,
+`gamma_ink` and `gamma_erase` are model assumptions, not user settings.
+
+Only rows and cell-wide segments that differ from the previous frame are
+visited, and the per-cell statistics below are updated by difference (each
+changed pixel removes its old contribution and adds the new one), so a
+sample costs in proportion to the changed area: a typed line or a moving
+cursor costs a fraction of a millisecond.
 
 `E` is classified by polarity and magnitude. A dark ghost is `E <= -min_error`
 (8) on content at or above 128: old dark ink still visible on light content.
@@ -85,7 +97,8 @@ aspect ratio). A cell is dirty for a polarity when at least
 `max(24 model pixels, 5% of its area)` carry that polarity with an error over
 `min_error`; dirty cells of the same polarity are joined by 8-connectivity
 into the areas shown in the window, so a dark area and a light halo touching
-it remain two elements. Each area reports its bounding box in screen pixels,
+it remain two elements. Each area reports the bounding box of its ghost
+pixels (not of whole cells) in screen pixels, widened to whole model pixels,
 its severity (100 when its counted pixels are off by 128 levels on average),
 its age (since the cell first became dirty) and the application recorded at
 that moment, which is why a label survives the window closing.
@@ -97,8 +110,13 @@ image: negative on light content as darker grey, positive on dark content as
 a warm tint (a light residue lighter than the preview's background could not
 be seen on its own), with the faint cell grid and each area outlined in its
 polarity's colour. The panel is never read back: only a photo can confirm a
-real ghost. `Reset estimate` models a full panel refresh; a zone flash resets
-the estimate over the flashed rectangle at cell granularity.
+real ghost. `Reset estimate` models a full panel refresh. A zone flash
+resets the model pixels under the flashed rectangle — the same pixels its
+area was computed from, so a flashed area does not come back — and the
+sample taken right after the flash takes the content then shown there as
+clean: the overlay drove those pixels through white and black before
+revealing it. A cell keeps its ghost, and its age, only where ghost pixels
+lie outside the flashed rectangle.
 
 ## Zone clearing
 
@@ -142,13 +160,26 @@ the next start: with the stored token later starts open the session silently
 (verified on KDE), and only a refused or expired grant asks again. KWin's
 own screenshot API is allowlisted to installed screenshot applications, so
 the tray uses the ScreenCast portal and reads the PipeWire stream with
-GStreamer; no image is written to disk.
+GStreamer; no image is written to disk. The stream stays raw: it only keeps
+the latest frame and notes that the screen changed, and a sample converts
+that one frame to grey at the model size (`videoscale method=bilinear2`,
+which averages every screen pixel under a model pixel like the X11
+reduction; the default two-tap filter made thin text flicker in and out of
+the model).
 
-On X11 the Dasung region of the root window is captured directly; the
-automatic detection reads the monitors' EDID model names through
-`python-xlib`, since Gdk only reports the RandR output name there, and
-matches them against the active panel profile's `edid_names`; `ghost.output`
-selects the monitor when that fails, by model or by output name (`DP-1`).
+On X11 the Dasung region of the root window is captured directly, with an
+`XGetImage` of the region when `python-xlib` is available (the GTK grab
+reads through the whole scaled desktop and costs far more per sample, so
+it stays as the fallback); the automatic detection reads the monitors'
+EDID model names through `python-xlib`, since Gdk only reports the RandR
+output name there, and matches them against the active panel profile's
+`edid_names` (the Gdk rectangles are scaled by the session's window scale
+first); `ghost.output` selects the monitor when that fails, by model or by
+output name (`DP-1`). With `python-xlib` the capture also follows the X
+DAMAGE reports of the top-level windows: a sample re-reads only the blocks
+of the monitor that changed into the cached model frame, aligned so that the
+result is byte-identical to a full read, and the full read runs on the first
+sample, after a geometry change and on the `max_interval` check.
 
 The capture covers only the panel's monitor on both backends: the estimate
 never sees the rest of the desktop. The label channel reads window geometry
@@ -159,40 +190,39 @@ the outputs' EDID and connection state.
 
 The estimate runs inside the tray process, on the GTK main loop, in plain
 Python: there is no worker thread and no helper process, and it never opens
-the serial port. A timer wakes the tray once per second and asks the watcher
-whether a sample is due; `ghost.interval` (2 s) is the base cadence, a sample
-with no changed pixels doubles the wait up to `ghost.max_interval` (30 s),
-and the first change and an open `Ghost estimate…` window return to the base
-cadence. An idle screen therefore costs almost nothing between samples, at
-the price of a threshold alert late by up to `max_interval`.
+the serial port (the Wayland stream callback runs on a GStreamer thread and
+only keeps a reference to the newest frame). A timer wakes the tray once per
+second and asks the watcher whether a sample is due (see *How it works*):
+with change reports a still screen costs no capture at all apart from the
+`max_interval` check, and a sample costs in proportion to what changed.
 
-Each due sample captures the monitor and updates the model. Indicative
-measurements on the maintainer's machine (Python 3.13, a 2200×1650 monitor at
-the default `width` 480):
+Indicative measurements on the maintainer's X11 machine (Linux Mint,
+Python 3.12, the 2200×1650 panel at the default `width` 480, model 480×360):
 
 | Step | Cost |
 | --- | --- |
-| frame capture and reduction | backend-dependent; on Wayland the conversion is done by GStreamer, on X11 by GDK plus a Python grey pass |
-| X11 grey conversion, 480×360 RGBA | about 16 ms |
-| model update, 480×360 | 13 ms with ~10% of the pixels changed, 32 ms on a whole-frame change, 0.15 ms on an identical frame |
-| model update, 1200×900 (`ghost.width` 1200) | 84 ms, up to 198 ms on a whole-frame change |
-| preview, 300 px wide | about 9 ms, only while the `Ghost estimate…` window is open |
-| model memory | about 8 bytes per model pixel: ~1.4 MB at 480×360, ~8.6 MB at 1200×900 |
+| full read of the monitor (XGetImage, reduction, grey) | 60–110 ms |
+| partial read after a change | 0.2 ms with nothing damaged, 15–45 ms for a band of terminal lines |
+| grey conversion of the reduced frame (in GdkPixbuf) | about 1 ms |
+| model update, 480×360 | 0.1 ms for a typed line, 8 ms with 10% of the rows changed, 46 ms on a whole-frame change, nothing on an identical frame |
+| model update, 1200×900 (`ghost.width` 1200) | 0.3 ms for a typed line, 21 ms with 10% of the rows changed, 235 ms on a whole-frame change |
+| preview, 300 px wide | about 9 ms, only when the estimate changed and the window is open |
+| model memory | about 4 bytes per model pixel, plus one for the X11 frame cache: ~0.9 MB at 480×360 |
+| sampling loop, 60 s with an active terminal on the panel | 1.6% of one core (4.6% with the previous whole-frame reads and model) |
 
-These are reference measurements, not guarantees. The capture backend shapes
-the cost too: on Wayland the ScreenCast pipeline stays open between samples
-and keeps converting and scaling while the shared monitor changes, even when
-no sample is due; on X11 every sample copies the monitor region out of the X
-server. The window labels are queried at most every 3 s while sampling (EWMH
-on X11; on KDE Wayland the tray loads, starts and unloads a small script in
-the compositor and waits on a nested main loop). Everything shares the tray's
-single GTK thread, so a sample runs between two interface updates: the
-defaults stay in the low tens of milliseconds, but a large `ghost.width`
-makes a sample tens to hundreds of milliseconds and a visible hitch.
+A whole-frame change costs more than with the previous model (33 ms at
+480×360) because every pixel updates the statistics by difference and the
+areas get tight boxes; every smaller change, which is the common case,
+costs far less. Everything shares the tray's single GTK thread, so a sample
+runs between two interface updates: a large `ghost.width` makes a
+whole-frame change hundreds of milliseconds and a visible hitch. The window
+labels are queried at most every 3 s while sampling (EWMH on X11; on KDE
+Wayland the tray loads, starts and unloads a small script in the compositor
+and waits on a nested main loop).
 
 The same steps measured on the maintainer's Wayland machine (Fedora KDE,
 Python 3.14, the same panel rotated 90° and scaled 1.75, so the model is
-480×640):
+480×640), with the previous single pipeline that converted every frame:
 
 | Step | Cost |
 | --- | --- |
@@ -202,9 +232,12 @@ Python 3.14, the same panel rotated 90° and scaled 1.75, so the model is
 | model update, 480×640 | 19 ms with ~10% of the pixels changed, 46 ms on a whole-frame change |
 | the whole tray process, estimate and auto-clearing active | ~100 MB RSS, ~1.7% CPU over a session |
 
-The Wayland pipeline only produces frames on damage, so an idle panel is
-nearly free, and the open `Ghost estimate…` window (or an auto-clear wave)
-keeps pulling them at the base cadence instead.
+The current stream keeps the newest frame instead of waiting for one, so a
+still panel no longer costs the ~1 s pull, and it converts only the frame a
+sample uses. With a 40 fps 2200×1650 test source in place of PipeWire, the
+open stream cost about 1% of one core while the picture changed, against
+about 35% for the previous pipeline, and converting one frame at sample time
+took 15–20 ms. These numbers still need confirming on KDE.
 
 ## Known limitations
 
@@ -221,6 +254,13 @@ keeps pulling them at the base cadence instead.
 - The monitor-presence check on Wayland reads `/sys/class/drm`; without
   readable connected outputs it returns "cannot tell" and only the serial
   exchanges decide, as on X11 without the EDID names.
+- On X11 what the compositor draws by itself has no window and reports no
+  damage: Cinnamon's panels, notifications and on-screen displays reach the
+  estimate only at the `max_interval` full read, and a notification that
+  comes and goes in between is missed. If a full read finds the frame
+  changed although nothing was reported, twice in a row, the tracking turns
+  itself off for the session and the log says so; sampling then falls back
+  to the timer.
 
 ## Implementation notes
 
@@ -275,8 +315,32 @@ These are the non-obvious points future changes must keep in mind.
 - *The model* section above describes the formulas; keep it in sync with
   `ghostwatch.py`. Components are built per polarity, and the label is
   recorded when a cell first becomes dirty and kept while it stays dirty.
-- Sampling backs off by doubling up to `max_interval` while samples show no
-  changes; `set_force_base(True)` (the open window) restores the base rate.
+- Sampling: a capture with `poll_changes()` (True, False, or None when it
+  cannot tell) drives `GhostWatcher.due()` — a change waits for `interval`,
+  a still screen waits for the `max_interval` check, which calls the
+  capture's `request_full()`. Without it the interval doubles up to
+  `max_interval` while samples show no changes. `set_force_base(True)` (the
+  open window) keeps the base rate either way, and `request_sample()` (after
+  a zone flash) samples at the next tick.
+- The per-cell statistics are maintained by difference in `_update`,
+  `reset_area` and the post-flash clean: never rebuild them from the pixels
+  in the hot path, and keep every pixel write paired with its statistics
+  update. `tests/test_ghostwatch.py` recounts them from the pixels after
+  random sequences.
+- X11 change tracking (`screencap.X11DamageTracker`): damage on the root
+  window is useless under a compositing manager (Muffin reported the whole
+  screen on every repaint); a damage object on each root child reports the
+  exact rectangles. `damage_query_version()` must come before
+  `damage_create`, and python-xlib clones extension event classes per
+  display, so events are matched on `display.extension_event.DamageNotify`,
+  never with `isinstance` (an earlier draft ignored every report that way).
+  Windows reparented into a WM frame drop their damage object, because
+  their reports would be relative to the frame.
+- Partial X11 reads (`screencap.partial_plan`) work in blocks of q device
+  pixels that reduce to exactly p model pixels (`model / device = p / q`),
+  with one model pixel of slack around the copied area: that is what makes
+  them byte-identical to a full GdkPixbuf reduction; a block edge touching
+  the copied pixels drifts by one level.
 - With a static screen, frames differ only by capture jitter below the
   per-pixel noise floor, so `changed_pixels` can legitimately stay 0 for many
   samples.

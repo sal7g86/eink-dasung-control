@@ -42,8 +42,10 @@ Configuration lives in `$XDG_CONFIG_HOME/dasungctl/config.json`
 - `autorefresh` sets the starting interval and whether the timer uses the hard
   refresh frame (`false` = soft).
 - `ghost` configures the ghost estimate (see
-  [ghost-estimate.md](ghost-estimate.md)): `interval` is the base sampling
-  period in seconds, `max_interval` the cap reached while nothing changes,
+  [ghost-estimate.md](ghost-estimate.md)): `interval` is the shortest time
+  in seconds between two samples, `max_interval` the period of the full
+  check while the screen stays still (or, when the capture cannot report
+  changes, the cap the timer backs off to),
   `threshold` the 0-100 level that writes the threshold alert to the log,
   `output` the monitor name substring (the X11 capture auto-detect and the
   monitor-presence check; on Wayland the share dialog still picks the

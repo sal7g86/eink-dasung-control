@@ -19,7 +19,13 @@ How one sample works, per model pixel:
 Pixels the capture shows as changed are rewritten by the panel with an
 efficiency ``gamma`` (less than 1), so ``A`` approaches ``S`` but does not
 reach it; untouched pixels keep their error, which is why a ghost stays until
-the area is rewritten or a refresh clears the panel.
+the area is rewritten or a refresh clears the panel. A change within the
+capture noise moves ``A`` together with ``S``: it neither drives the model
+nor leaves residue, and the error stays what it was.
+
+Only rows and cell-wide segments that differ from the previous frame are
+visited, and the per-cell statistics are updated by difference, so a sample
+costs in proportion to the area that changed.
 
 Both polarities are reported. Negative errors are dark ghosts: old dark
 content that the current light content leaves visible (erasing is the weaker
@@ -160,8 +166,10 @@ class GhostModel:
             raise ValueError("source size must be positive")
         if not 0 <= noise <= 255:
             raise ValueError("noise must be in 0..255")
-        if not 0 <= min_error <= 255:
-            raise ValueError("min_error must be in 0..255")
+        # A zero error is never a ghost; the update loop relies on it to
+        # skip untouched pixels without testing the gates.
+        if not 1 <= min_error <= 255:
+            raise ValueError("min_error must be in 1..255")
         if not 1 <= gamma_ink <= 100:
             raise ValueError("gamma_ink must be in 1..100")
         if not 1 <= gamma_erase <= 100:
@@ -192,7 +200,6 @@ class GhostModel:
         self.cell_width = max(1, -(-width // self.columns))
         self.rows = max(1, -(-height // self.cell_width))
         self._cell_count = self.columns * self.rows
-        self._cell_of = array("i", bytes(4 * size))
         self._cell_area = [0] * self._cell_count
         for row in range(self.rows):
             y0 = row * self.cell_width
@@ -200,12 +207,15 @@ class GhostModel:
             for column in range(self.columns):
                 x0 = column * self.cell_width
                 x1 = min(x0 + self.cell_width, width)
-                cell = row * self.columns + column
-                self._cell_area[cell] = (y1 - y0) * (x1 - x0)
-                values = array("i", [cell] * (x1 - x0))
-                for y in range(y0, y1):
-                    base = y * width
-                    self._cell_of[base + x0 : base + x1] = values
+                self._cell_area[row * self.columns + column] = (y1 - y0) * (
+                    x1 - x0
+                )
+        # Column segments of one row, ``(offset, end, column)``: the update
+        # compares and walks the frame one cell-wide segment at a time.
+        self._segments = tuple(
+            (column * self.cell_width, min((column + 1) * self.cell_width, width), column)
+            for column in range(self.columns)
+        )
         # Onsets are per polarity: the same cell can hold a dark and a light
         # residue, and each area's age starts when it formed.
         self._onset_dark = [0.0] * self._cell_count
@@ -216,14 +226,27 @@ class GhostModel:
         # same whichever residue formed there.
         self._cell_app: list[str | None] = [None] * self._cell_count
         self._cell_full = [False] * self._cell_count
-        # Last sample's per-cell dirty statistics; None before the first
-        # sample and after a reset until the next one.
-        self._counts: list[int] | None = None
-        self._sums: list[int] | None = None
-        self._light_counts: list[int] | None = None
-        self._light_sums: list[int] | None = None
+        # Per-cell ghost statistics (pixel count and summed |E|, per
+        # polarity). They always describe the current pixels: every change
+        # subtracts a pixel's old contribution and adds the new one, so a
+        # sample costs in proportion to the changed area instead of the
+        # whole frame. Never rebuild them from scratch in the hot path.
+        self._counts = [0] * self._cell_count
+        self._sums = [0] * self._cell_count
+        self._light_counts = [0] * self._cell_count
+        self._light_sums = [0] * self._cell_count
         self._dirty_dark: list[int] = []
         self._dirty_light: list[int] = []
+        # Tight bounding box of the ghost pixels per (cell, dark), computed
+        # on demand for the dirty cells and dropped when a cell changes.
+        self._boxes: dict[tuple[int, bool], tuple[int, int, int, int] | None] = {}
+        # Areas flashed by the zone clearer (model coordinates): the next
+        # sample takes the content shown there as clean, because the overlay
+        # drove those pixels through white/black before revealing it.
+        self._pending_clean: list[tuple[int, int, int, int]] = []
+        # Bumped whenever the estimate may have changed, so views can cache
+        # what they derive from it (the preview).
+        self.version = 0
 
     @property
     def result(self) -> GhostResult | None:
@@ -261,14 +284,18 @@ class GhostModel:
             self._previous[:] = frame
             self._started = True
             self._samples = 1
+            self._pending_clean = []
+            self.version += 1
             self._result = self._build_result(
-                now, wall, changed=0, stats=None, annotate=annotate
+                now, wall, changed=0, annotate=annotate
             )
             return self._result
-        changed, stats = self._update(frame)
+        changed = self._update(frame)
+        if self._pending_clean:
+            self._apply_pending_clean()
         self._samples += 1
         self._result = self._build_result(
-            now, wall, changed=changed, stats=stats, annotate=annotate
+            now, wall, changed=changed, annotate=annotate
         )
         return self._result
 
@@ -281,15 +308,16 @@ class GhostModel:
         self._onset_light = [0.0] * self._cell_count
         self._cell_app = [None] * self._cell_count
         self._cell_full = [False] * self._cell_count
-        # Zero the stored statistics too: the dirty grid is derived from
-        # them, so a reset must not leave the previous sample's cells dirty.
         self._counts = [0] * self._cell_count
         self._sums = [0] * self._cell_count
         self._light_counts = [0] * self._cell_count
         self._light_sums = [0] * self._cell_count
+        self._boxes.clear()
+        self._pending_clean = []
         if self._started:
             self._shown[:] = self._previous
-        self._result = self._build_result(now, wall, changed=0, stats=None)
+        self.version += 1
+        self._result = self._build_result(now, wall, changed=0)
         return self._result
 
     def reset_area(
@@ -304,114 +332,205 @@ class GhostModel:
         """Model a local refresh: only this source rectangle comes clean.
 
         The overlay flash rewrites the pixels under the area, so the panel
-        estimate there returns to the current content while every other cell
-        keeps its ghost. Cells are the model's granularity: a cell touching
-        the rectangle is cleared entirely.
+        estimate there returns to the current content while every other
+        pixel keeps its ghost. The rectangle is widened to whole model pixels
+        with the same covering rule as the element rectangles, so flashing an
+        element clears it entirely; a cell keeps its ghost (and its age) only
+        where dirty pixels lie outside the flashed area. The next sample also
+        takes the content then on screen inside the area as clean: the
+        overlay drove those pixels through white and black before revealing
+        it.
         """
 
         wall = time.time() if wall is None else wall
         if width <= 0 or height <= 0:
             raise ValueError("area must be positive")
-        left = max(0, min(self.width, round(x * self.width / self.source_width)))
+        left, top, right, bottom = self._model_rect(x, y, width, height)
+        if right > left and bottom > top:
+            self._clean_rect(left, top, right, bottom)
+            self._pending_clean.append((left, top, right, bottom))
+        self.version += 1
+        self._result = self._build_result(now, wall, changed=0)
+        return self._result
+
+    def _model_rect(
+        self, x: int, y: int, width: int, height: int
+    ) -> tuple[int, int, int, int]:
+        """Source rectangle to the model pixels it touches (floor/ceil)."""
+
+        x, y, width, height = int(x), int(y), int(width), int(height)
+        source_width, source_height = self.source_width, self.source_height
+        left = max(0, min(self.width, x * self.width // source_width))
+        top = max(0, min(self.height, y * self.height // source_height))
         right = max(
-            left,
-            min(self.width, round((x + width) * self.width / self.source_width)),
-        )
-        top = max(
-            0, min(self.height, round(y * self.height / self.source_height))
+            left, min(self.width, -(-(x + width) * self.width // source_width))
         )
         bottom = max(
             top,
-            min(
-                self.height,
-                round((y + height) * self.height / self.source_height),
-            ),
+            min(self.height, -(-(y + height) * self.height // source_height)),
         )
-        previous = self._previous
+        return left, top, right, bottom
+
+    def _clean_rect(self, left: int, top: int, right: int, bottom: int) -> None:
+        """Set ``A = S`` and ``E = 0`` over a model rectangle.
+
+        The per-cell statistics lose exactly the contributions of the
+        cleaned pixels, so they keep describing the remaining ghost.
+        """
+
         shown = self._shown
         error = self._error
-        for row in range(top, bottom):
-            base = row * self.width
-            for index in range(base + left, base + right):
-                shown[index] = previous[index]
-                error[index] = 0
+        content = self._previous
+        min_error = self.min_error
         counts, sums = self._counts, self._sums
         light_counts, light_sums = self._light_counts, self._light_sums
-        first_row = top // self.cell_width
-        last_row = (
-            min(self.rows, (bottom - 1) // self.cell_width + 1)
-            if bottom > top
-            else first_row
-        )
-        first_column = left // self.cell_width
-        last_column = (
-            min(self.columns, (right - 1) // self.cell_width + 1)
-            if right > left
-            else first_column
-        )
-        for row in range(first_row, last_row):
-            for column in range(first_column, last_column):
-                cell = row * self.columns + column
-                self._onset_dark[cell] = 0.0
-                self._onset_light[cell] = 0.0
-                self._cell_app[cell] = None
-                self._cell_full[cell] = False
-                if counts is not None and sums is not None:
-                    counts[cell] = 0
-                    sums[cell] = 0
-                if light_counts is not None and light_sums is not None:
-                    light_counts[cell] = 0
-                    light_sums[cell] = 0
-        self._result = self._build_result(now, wall, changed=0, stats=None)
-        return self._result
+        cell_width = self.cell_width
+        columns = self.columns
+        clean = array("h", bytes(2 * (right - left)))
+        for row in range(top, bottom):
+            base = row * self.width
+            start, stop = base + left, base + right
+            shown[start:stop] = content[start:stop]
+            if error[start:stop] == clean:
+                continue
+            row_cells = (row // cell_width) * columns
+            for index in range(start, stop):
+                level = error[index]
+                if not level:
+                    continue
+                if level <= -min_error and content[index] >= LIGHT_CONTENT:
+                    cell = row_cells + (index - base) // cell_width
+                    counts[cell] -= 1
+                    sums[cell] += level
+                elif level >= min_error and content[index] < LIGHT_CONTENT:
+                    cell = row_cells + (index - base) // cell_width
+                    light_counts[cell] -= 1
+                    light_sums[cell] -= level
+            error[start:stop] = clean
+        for row in range(top // cell_width, -(-bottom // cell_width)):
+            for column in range(left // cell_width, -(-right // cell_width)):
+                cell = row * columns + column
+                self._boxes.pop((cell, True), None)
+                self._boxes.pop((cell, False), None)
 
-    def _update(self, frame: bytes):
+    def _apply_pending_clean(self) -> None:
+        """Take the content inside the flashed areas as clean (post-flash)."""
+
+        for rect in self._pending_clean:
+            self._clean_rect(*rect)
+        self._pending_clean = []
+        self.version += 1
+
+    def _update(self, frame: bytes) -> int:
         """Move the panel estimate where the content changed.
 
-        Returns ``(changed_pixels, stats)``; ``stats`` is None when nothing
-        changed, so the previous cell statistics stay valid.
+        Rows and cell-wide segments identical to the previous frame are
+        skipped with one C-level comparison each, and inside a changed
+        segment only the pixels whose value moved are visited: each one
+        moves the per-cell statistics by the difference between its old and
+        its new contribution. Returns the number of pixels that drove the
+        panel (a change larger than the noise).
         """
 
         previous = self._previous
         if frame == previous:
-            return 0, None
+            return 0
         shown = self._shown
         error = self._error
-        cell_of = self._cell_of
         noise = self.noise
         min_error = self.min_error
         gamma_ink = self.gamma_ink
         gamma_erase = self.gamma_erase
-        counts = [0] * self._cell_count
-        sums = [0] * self._cell_count
-        light_counts = [0] * self._cell_count
-        light_sums = [0] * self._cell_count
+        low = -min_error
+        low_noise = -noise
+        light = LIGHT_CONTENT
+        counts, sums = self._counts, self._sums
+        light_counts, light_sums = self._light_counts, self._light_sums
+        segments = self._segments
+        width = self.width
+        cell_width = self.cell_width
+        columns = self.columns
+        touched = bytearray(self._cell_count)
         changed = 0
 
-        for index in range(self._size):
-            value = frame[index]
-            delta = value - previous[index]
-            if delta > noise or delta < -noise:
-                shown_value = shown[index]
-                gamma = gamma_erase if delta > 0 else gamma_ink
-                shown_value += (gamma * (value - shown_value)) // 100
-                shown[index] = shown_value
-                error[index] = shown_value - value
-                changed += 1
-            level = error[index]
-            # The two gates partition the content: a dark ghost is old dark
-            # ink left on light content, a light ghost is old light content
-            # left on dark content (including dark ink not fully saturated).
-            if level <= -min_error and value >= LIGHT_CONTENT:
-                cell = cell_of[index]
-                counts[cell] += 1
-                sums[cell] += -level
-            elif level >= min_error and value < LIGHT_CONTENT:
-                cell = cell_of[index]
-                light_counts[cell] += 1
-                light_sums[cell] += level
+        for row in range(self.height):
+            base = row * width
+            end = base + width
+            if frame[base:end] == previous[base:end]:
+                continue
+            row_cells = (row // cell_width) * columns
+            for offset, segment_end, column in segments:
+                start = base + offset
+                stop = base + segment_end
+                if frame[start:stop] == previous[start:stop]:
+                    continue
+                cell = row_cells + column
+                touched[cell] = 1
+                dark_count = dark_sum = light_count = light_sum = 0
+                for index in range(start, stop):
+                    value = frame[index]
+                    old_value = previous[index]
+                    if value == old_value:
+                        continue
+                    # The two gates partition the content: a dark ghost is
+                    # old dark ink left on light content, a light ghost is
+                    # old light content left on dark content (including dark
+                    # ink not fully saturated). First drop the pixel's old
+                    # contribution...
+                    level = error[index]
+                    if level:
+                        if level <= low:
+                            if old_value >= light:
+                                dark_count -= 1
+                                dark_sum += level
+                        elif level >= min_error and old_value < light:
+                            light_count -= 1
+                            light_sum -= level
+                    delta = value - old_value
+                    if delta > noise or delta < low_noise:
+                        shown_value = shown[index]
+                        if delta > 0:
+                            shown_value += (gamma_erase * (value - shown_value)) // 100
+                        else:
+                            shown_value += (gamma_ink * (value - shown_value)) // 100
+                        shown[index] = shown_value
+                        level = shown_value - value
+                        error[index] = level
+                        changed += 1
+                    else:
+                        # Below the noise the panel follows the content
+                        # without new residue: A moves with S and E stays,
+                        # so `E = A - S` keeps holding for the next update.
+                        shown_value = shown[index] + delta
+                        if 0 <= shown_value <= 255:
+                            shown[index] = shown_value
+                        else:
+                            shown_value = 0 if shown_value < 0 else 255
+                            shown[index] = shown_value
+                            level = shown_value - value
+                            error[index] = level
+                    # ...then add the new one.
+                    if level:
+                        if level <= low:
+                            if value >= light:
+                                dark_count += 1
+                                dark_sum -= level
+                        elif level >= min_error and value < light:
+                            light_count += 1
+                            light_sum += level
+                counts[cell] += dark_count
+                sums[cell] += dark_sum
+                light_counts[cell] += light_count
+                light_sums[cell] += light_sum
         previous[:] = frame
-        return changed, (counts, sums, light_counts, light_sums)
+        boxes = self._boxes
+        if boxes:
+            for cell in range(self._cell_count):
+                if touched[cell]:
+                    boxes.pop((cell, True), None)
+                    boxes.pop((cell, False), None)
+        self.version += 1
+        return changed
 
     def _build_result(
         self,
@@ -419,27 +538,12 @@ class GhostModel:
         wall: float,
         *,
         changed: int,
-        stats,
         annotate=None,
     ) -> GhostResult:
-        if stats is not None:
-            (
-                self._counts,
-                self._sums,
-                self._light_counts,
-                self._light_sums,
-            ) = stats
-        elif self._counts is None:
-            self._counts = [0] * self._cell_count
-            self._sums = [0] * self._cell_count
-            self._light_counts = [0] * self._cell_count
-            self._light_sums = [0] * self._cell_count
         counts = self._counts
         sums = self._sums
         light_counts = self._light_counts
         light_sums = self._light_sums
-        assert counts is not None and sums is not None
-        assert light_counts is not None and light_sums is not None
 
         dirty_dark: list[int] = []
         dirty_light: list[int] = []
@@ -558,10 +662,77 @@ class GhostModel:
             components.append(group)
         return components
 
+    def _cell_bounds(self, cell: int) -> tuple[int, int, int, int]:
+        """Model rectangle ``(left, top, right, bottom)`` of one cell."""
+
+        row, column = divmod(cell, self.columns)
+        left = column * self.cell_width
+        top = row * self.cell_width
+        return (
+            left,
+            top,
+            min(left + self.cell_width, self.width),
+            min(top + self.cell_width, self.height),
+        )
+
+    def _cell_box(self, cell: int, dark: bool) -> tuple[int, int, int, int] | None:
+        """Tight model box of one cell's ghost pixels of one polarity.
+
+        Computed on demand for dirty cells only and cached until a pixel of
+        the cell changes, so an element covers the residue instead of whole
+        cells and a flash rewrites no more of the panel than needed.
+        """
+
+        key = (cell, dark)
+        if key in self._boxes:
+            return self._boxes[key]
+        left, top, right, bottom = self._cell_bounds(cell)
+        error = self._error
+        content = self._previous
+        min_error = self.min_error
+        low = -min_error
+        light = LIGHT_CONTENT
+
+        def hit(index: int) -> bool:
+            level = error[index]
+            if dark:
+                return level <= low and content[index] >= light
+            return level >= min_error and content[index] < light
+
+        clean = array("h", bytes(2 * (right - left)))
+        x0 = y0 = None
+        x1 = y1 = 0
+        for row in range(top, bottom):
+            base = row * self.width
+            start, stop = base + left, base + right
+            if error[start:stop] == clean:
+                continue
+            # Scan in from both ends and stop at the first hit: a dense
+            # cell costs a few pixels per row instead of the whole row.
+            first = next((index for index in range(start, stop) if hit(index)), None)
+            if first is None:
+                continue
+            last = next(index for index in range(stop - 1, first - 1, -1) if hit(index))
+            if x0 is None or first - base < x0:
+                x0 = first - base
+            if last - base + 1 > x1:
+                x1 = last - base + 1
+            if y0 is None:
+                y0 = row
+            y1 = row + 1
+        box = None if x0 is None or y0 is None else (x0, y0, x1, y1)
+        self._boxes[key] = box
+        return box
+
     def _element_from_cells(
         self, cells: Sequence[int], now: float, *, dark: bool
     ) -> GhostElement:
-        """One ghost area from a group of dirty cells of one polarity."""
+        """One ghost area from a group of dirty cells of one polarity.
+
+        The rectangle is the union of the cells' tight ghost boxes, widened
+        to whole screen pixels (floor/ceil) so that `reset_area` of the same
+        rectangle maps back onto exactly these model pixels.
+        """
 
         if dark:
             counts, sums = self._counts, self._sums
@@ -569,22 +740,17 @@ class GhostModel:
         else:
             counts, sums = self._light_counts, self._light_sums
             onset_of = self._onset_light
-        assert counts is not None and sums is not None
         pixel_count = sum(counts[cell] for cell in cells)
         abs_sum = sum(sums[cell] for cell in cells)
         x0, y0 = self.width, self.height
         x1 = y1 = 0
         onset = now
         for cell in cells:
-            row, column = divmod(cell, self.columns)
-            left = column * self.cell_width
-            top = row * self.cell_width
-            right = min(left + self.cell_width, self.width)
-            bottom = min(top + self.cell_width, self.height)
-            x0 = min(x0, left)
-            y0 = min(y0, top)
-            x1 = max(x1, right)
-            y1 = max(y1, bottom)
+            box = self._cell_box(cell, dark) or self._cell_bounds(cell)
+            x0 = min(x0, box[0])
+            y0 = min(y0, box[1])
+            x1 = max(x1, box[2])
+            y1 = max(y1, box[3])
             if onset_of[cell] and onset_of[cell] < onset:
                 onset = onset_of[cell]
         severity = min(
@@ -593,13 +759,15 @@ class GhostModel:
         # The window label comes from the cell with the most dirty pixels:
         # that is where the ghost mostly is.
         best = max(cells, key=lambda cell: counts[cell])
+        source_x0 = x0 * self.source_width // self.width
+        source_y0 = y0 * self.source_height // self.height
+        source_x1 = -(-x1 * self.source_width // self.width)
+        source_y1 = -(-y1 * self.source_height // self.height)
         return GhostElement(
-            x=round(x0 * self.source_width / self.width),
-            y=round(y0 * self.source_height / self.height),
-            width=max(1, round((x1 - x0) * self.source_width / self.width)),
-            height=max(
-                1, round((y1 - y0) * self.source_height / self.height)
-            ),
+            x=source_x0,
+            y=source_y0,
+            width=max(1, source_x1 - source_x0),
+            height=max(1, source_y1 - source_y0),
             severity=severity,
             dark=dark,
             age=max(0.0, now - onset),
@@ -639,7 +807,9 @@ class GhostModel:
         ]
         error = self._error
         min_error = self.min_error
-        content = self._shown
+        # The same gates as the statistics: the current content decides
+        # where a residue of each polarity is visible.
+        content = self._previous
         buffer = bytearray(width * height * 3)
         base = 235
         index = 0
@@ -881,9 +1051,14 @@ class GhostWatcher:
         self._busy = False
         # Adaptive sampling: each sample without changes doubles the wait up
         # to `max_interval`; the base interval returns as soon as something
-        # changes (and while the ghost window is open).
+        # changes (and while the ghost window is open). A capture that can
+        # report changes (`poll_changes`) replaces this timer: see `due`.
         self._idle_steps = 0
         self._force_base = False
+        # A sample requested out of turn (right after a zone flash), and
+        # whether the next one is the event mode's periodic full check.
+        self._forced = False
+        self._heartbeat = False
         self._zone_list = ()
         self._zones_at = 0.0
 
@@ -941,15 +1116,47 @@ class GhostWatcher:
 
         self.paused = bool(active)
 
+    def request_sample(self) -> None:
+        """Take the next sample as soon as possible (after a zone flash)."""
+
+        self._forced = True
+
+    def _poll_changes(self) -> bool | None:
+        """The capture's change report: True, False, or None (cannot tell)."""
+
+        poll = getattr(self.capturer, "poll_changes", None)
+        if not callable(poll):
+            return None
+        try:
+            return poll()
+        except Exception:  # pragma: no cover - change tracking is best-effort
+            return None
+
     def due(self, now: float | None = None) -> bool:
-        """True when a new sample should be taken."""
+        """True when a new sample should be taken.
+
+        With a capture that reports changes (X11 damage, Wayland stream
+        frames) a sample follows a change once `interval` has passed since
+        the previous one, nothing is captured while the screen is still, and
+        a full check runs every `max_interval` in case a change went
+        unreported. Otherwise the timer with its idle backoff decides.
+        """
 
         if not self.enabled or self.paused or self.capture_failed:
             return False
         moment = self._clock() if now is None else now
-        if self._last_sample is None:
+        if self._last_sample is None or self._forced:
             return True
-        return moment - self._last_sample >= self.current_interval
+        elapsed = moment - self._last_sample
+        changes = self._poll_changes()
+        if changes is None:
+            return elapsed >= self.current_interval
+        if changes or self._force_base:
+            return elapsed >= self.interval
+        if elapsed >= self.max_interval:
+            self._heartbeat = True
+            return True
+        return False
 
     def sample(self) -> GhostResult | None:
         """Capture one frame and update the estimate; errors are kept here.
@@ -971,6 +1178,12 @@ class GhostWatcher:
         if not self.enabled or self.paused or self.capture_failed:
             return None
         self._last_sample = self._clock()
+        self._forced = False
+        if self._heartbeat:
+            self._heartbeat = False
+            request_full = getattr(self.capturer, "request_full", None)
+            if callable(request_full):
+                request_full()
         if self.capturer is None:
             self.error = "no screen capture backend for this session"
             self.capture_failed = True

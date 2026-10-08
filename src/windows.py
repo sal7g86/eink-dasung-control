@@ -131,8 +131,13 @@ class X11Zones:
 
     name = "x11"
 
-    def __init__(self) -> None:
-        """Import python-xlib eagerly, or raise ZoneUnavailable."""
+    def __init__(self, scale: int = 1) -> None:
+        """Import python-xlib eagerly, or raise ZoneUnavailable.
+
+        `scale` is the GTK window scale of the session: EWMH reports raw X
+        rectangles (device pixels) while the captured monitor and the model
+        work in application pixels, so the rectangles are divided by it.
+        """
 
         try:
             from Xlib import display as xdisplay
@@ -141,6 +146,7 @@ class X11Zones:
                 "python-xlib is not installed (install the 'labels' extra)"
             ) from exc
         self._xdisplay = xdisplay
+        self._scale = max(1, int(scale))
         self._connection = None
 
     def _display(self):
@@ -189,14 +195,17 @@ class X11Zones:
                 fullscreen = bool(
                     state is not None and fullscreen_atom in list(state.value)
                 )
+                # Back to application pixels: the captured monitor and every
+                # other coordinate the estimate sees are in that space.
+                scale = self._scale
                 windows.append(
                     {
                         "resourceClass": resource_class,
                         "fullScreen": fullscreen,
-                        "x": translated.x,
-                        "y": translated.y,
-                        "width": geometry.width,
-                        "height": geometry.height,
+                        "x": translated.x / scale,
+                        "y": translated.y / scale,
+                        "width": geometry.width / scale,
+                        "height": geometry.height / scale,
                     }
                 )
             except Exception:  # pragma: no cover - a dead window must not stop us
@@ -451,14 +460,19 @@ class KWinZones:
         return to_monitor_zones(windows, origin_x, origin_y, width, height)
 
 
-def open_zones():
-    """Best provider for this session, or None when labels are unavailable."""
+def open_zones(scale: int = 1):
+    """Best provider for this session, or None when labels are unavailable.
+
+    `scale` is the GTK window scale of the session (1 when the desktop is
+    unscaled): the X11 provider needs it to convert EWMH device rectangles
+    into the application pixels the estimate works with.
+    """
 
     if os.environ.get("WAYLAND_DISPLAY"):
         if "kde" in os.environ.get("XDG_CURRENT_DESKTOP", "").lower():
             return KWinZones()
         return None
     try:
-        return X11Zones()
+        return X11Zones(scale=scale)
     except ZoneUnavailable:
         return None
